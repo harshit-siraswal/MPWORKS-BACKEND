@@ -21,7 +21,7 @@ services:
       - key: MPLADS_MAX_WORKS
         value: "0"
       - key: GROQ_MODEL
-        value: llama-3.3-70b-versatile
+        value: openai/gpt-oss-20b
       - key: R2_ACCOUNT_ID
         value: 3df99a00c707520696105ece185c3de8
       - key: R2_BUCKET
@@ -66,7 +66,7 @@ services:
       - key: MPLADS_MAX_WORKS
         value: "0"
       - key: GROQ_MODEL
-        value: llama-3.3-70b-versatile
+        value: openai/gpt-oss-20b
       - key: R2_ACCOUNT_ID
         value: 3df99a00c707520696105ece185c3de8
       - key: R2_BUCKET

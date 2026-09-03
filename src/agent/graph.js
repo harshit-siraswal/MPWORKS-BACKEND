@@ -36,7 +36,7 @@ async function persistRun() {
 
 async function analyzeRun(state) {
   if (!process.env.GROQ_API_KEY || !state.manifest) return { status: 'skipped', reason: 'GROQ_API_KEY is not configured', sourceFacts: { works: state.manifest?.works || 0, errors: state.manifest?.errors?.length || 0 } };
-  const model = new ChatGroq({ apiKey: process.env.GROQ_API_KEY, model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile', temperature: 0 });
+  const model = new ChatGroq({ apiKey: process.env.GROQ_API_KEY, model: process.env.GROQ_MODEL || 'openai/gpt-oss-20b', temperature: 0 });
   const response = await model.invoke(`Review this ingestion manifest as an operations analyst. Do not invent facts; identify only possible scraper anomalies from this JSON: ${JSON.stringify(state.manifest)}`);
   return { status: 'completed', text: response.content };
 }
