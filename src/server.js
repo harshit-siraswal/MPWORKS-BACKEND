@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { listProjects, getProject, getSummary, getSourceHealth, getFacets, getSourceMetadata, getMetrics, getVillages } from './catalog.js';
 import { getMetrics as getLiveMetrics } from './esakshi-source.js';
-import { fetchAndAnalyzeAttachments, fetchAndAnalyzeImages } from './image-analysis.js';
+import { analyzeStoredAttachments, fetchAndAnalyzeAttachments, fetchAndAnalyzeImages } from './image-analysis.js';
 import { analyzeEvidenceAgainstProject } from './evidence-analysis.js';
 import { persistEvidence } from './persistence/evidence.js';
 import { getDistrictAnalysis, startDistrictAnalysis } from './district-analysis.js';
@@ -49,6 +49,20 @@ function publicProject(project) {
   return { ...safeProject, imageCount: imageUrls.length, attachmentCount: attachmentIds.length };
 }
 
+function amountFromProject(project, field, normalizedField) {
+  const value = project.raw?.[field] ?? project.normalized?.[normalizedField];
+  const amount = Number(String(value ?? '').replace(/[^0-9.-]/g, ''));
+  return Number.isFinite(amount) ? amount : 0;
+}
+
+function districtMetrics(filters) {
+  const metrics = getMetrics(filters);
+  const scoped = listProjects(filters);
+  metrics.sanctionedAmount = scoped.reduce((sum, project) => sum + amountFromProject(project, 'SANCTION_AMOUNT', 'sanctionAmountInr'), 0) || null;
+  metrics.usedAmount = scoped.reduce((sum, project) => sum + amountFromProject(project, 'ACTUAL_AMOUNT', 'usedAmountInr'), 0) || null;
+  return metrics;
+}
+
 async function geocodeDistrict(district, state) {
   const key = `${district}|${state}`;
   if (geocodeCache.has(key)) return geocodeCache.get(key);
@@ -77,7 +91,7 @@ const server = createServer(async (request, response) => {
   if (request.method === 'GET' && url.pathname === '/api/health') return sendJson(response, 200, { status: 'ok', service: 'mplad-intelligence-api', version: '0.2.0' });
   if (request.method === 'GET' && url.pathname === '/api/catalog/summary') return sendJson(response, 200, { data: getSummary(), provenance: { queryVersion: 'summary-v0.2', generatedAt: new Date().toISOString() } });
   if (request.method === 'GET' && url.pathname === '/api/catalog/facets') return sendJson(response, 200, { data: getFacets(filtersFrom(url)), provenance: getSourceMetadata() });
-  if (request.method === 'GET' && url.pathname === '/api/catalog/metrics') return sendJson(response, 200, { data: getMetrics(filtersFrom(url)), provenance: getSourceMetadata() });
+  if (request.method === 'GET' && url.pathname === '/api/catalog/metrics') return sendJson(response, 200, { data: districtMetrics(filtersFrom(url)), provenance: getSourceMetadata() });
   if (request.method === 'GET' && url.pathname === '/api/villages') {
     const villages = getVillages(filtersFrom(url));
     const offset = Math.max(Number(url.searchParams.get('offset') || 0), 0);
@@ -137,7 +151,9 @@ const server = createServer(async (request, response) => {
     const project = getProject(refreshMatch[1]);
     if (!project) return sendJson(response, 404, { error: 'project_not_found' });
     const attachmentOrigin = process.env.MPLADS_API_ORIGIN || 'https://mplads.gov.in';
-    const evidence = project.imageUrls.length
+    const evidence = project.attachmentCandidates?.length
+      ? await analyzeStoredAttachments(project.attachmentCandidates)
+      : project.imageUrls.length
       ? await fetchAndAnalyzeImages(project.imageUrls)
       : await fetchAndAnalyzeAttachments(project.attachmentIds, attachmentOrigin);
     let comparison = { status: 'inconclusive', reason: 'No image or PDF evidence was fetched' };
