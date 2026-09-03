@@ -1,5 +1,6 @@
 import { createServer } from 'node:http';
-import { listProjects, getProject, getSummary, getSourceHealth, getFacets, getSourceMetadata } from './catalog.js';
+import { listProjects, getProject, getSummary, getSourceHealth, getFacets, getSourceMetadata, getMetrics, getVillages } from './catalog.js';
+import { getMetrics as getLiveMetrics } from './esakshi-source.js';
 import { fetchAndAnalyzeAttachments, fetchAndAnalyzeImages } from './image-analysis.js';
 
 const port = Number(process.env.PORT || 8000);
@@ -29,6 +30,7 @@ function filtersFrom(url) {
     memberType: url.searchParams.get('memberType'),
     state: url.searchParams.get('state'),
     district: url.searchParams.get('district'),
+    constituency: url.searchParams.get('constituency'),
     category: url.searchParams.get('category'),
     status: url.searchParams.get('status')
   };
@@ -62,6 +64,19 @@ const server = createServer(async (request, response) => {
   if (request.method === 'GET' && url.pathname === '/api/health') return sendJson(response, 200, { status: 'ok', service: 'mplad-intelligence-api', version: '0.2.0' });
   if (request.method === 'GET' && url.pathname === '/api/catalog/summary') return sendJson(response, 200, { data: getSummary(), provenance: { queryVersion: 'summary-v0.2', generatedAt: new Date().toISOString() } });
   if (request.method === 'GET' && url.pathname === '/api/catalog/facets') return sendJson(response, 200, { data: getFacets(filtersFrom(url)), provenance: getSourceMetadata() });
+  if (request.method === 'GET' && url.pathname === '/api/catalog/metrics') return sendJson(response, 200, { data: getMetrics(filtersFrom(url)), provenance: getSourceMetadata() });
+  if (request.method === 'GET' && url.pathname === '/api/villages') {
+    const villages = getVillages(filtersFrom(url));
+    const offset = Math.max(Number(url.searchParams.get('offset') || 0), 0);
+    const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 50), 1), 200);
+    return sendJson(response, 200, { data: villages.slice(offset, offset + limit), meta: { total: villages.length, offset, limit, hasMore: offset + limit < villages.length }, provenance: getSourceMetadata() });
+  }
+  if (request.method === 'GET' && url.pathname === '/api/catalog/live-metrics') {
+    const combo = url.searchParams.get('combo');
+    if (!combo || !/^\d+(,\d+){3,4}$/.test(combo)) return sendJson(response, 400, { error: 'combo_required', note: 'Use the official eSAKSHI state,constituency,mp,house[,tenure] codes.' });
+    try { return sendJson(response, 200, { data: await getLiveMetrics(combo), provenance: { source: getSourceMetadata().officialDashboard, api: getSourceMetadata().officialApi } }); }
+    catch (error) { return sendJson(response, 502, { error: 'live_metrics_unavailable', detail: error.message }); }
+  }
   if (request.method === 'GET' && url.pathname === '/api/source-health') return sendJson(response, 200, { data: getSourceHealth() });
   if (request.method === 'GET' && url.pathname === '/api/methodology') return sendJson(response, 200, { data: { riskLanguage: 'Risk indicators prioritize human review and are not conclusions.', methods: ['source-record-retention', 'optional-image-metadata-and-similarity'], caveats: ['Image coverage is source-dependent.', 'Coordinates are never silently invented. The map uses an explicitly labelled district approximation only.', 'No risk score is calculated until sufficient evidence is available.'], source: getSourceMetadata() } });
 

@@ -1,0 +1,7 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "mplads_ingest": "./src/agent/graph.js:graph"
+  },
+  "env": ".env"
+}

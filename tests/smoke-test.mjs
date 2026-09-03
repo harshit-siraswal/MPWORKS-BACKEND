@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { getFacets, getProject, getSourceHealth, getSummary, listProjects } from '../src/catalog.js';
+import { getFacets, getMetrics, getProject, getSourceHealth, getSummary, getVillages, listProjects } from '../src/catalog.js';
 
 const summary = getSummary();
 assert.ok(summary.total > 0, 'the catalog must contain source records');
@@ -13,6 +13,8 @@ assert.ok(listProjects({ house: 'Rajya Sabha' }).length > 0);
 const district = listProjects({})[0].district;
 assert.ok(district && listProjects({ district }).length > 1, 'district filter must match the full district, not one block');
 assert.notEqual(listProjects({})[0].district, listProjects({})[0].block, 'district and block must remain separate fields');
+assert.ok(getVillages({ query: 'Kaithri' }).some((village) => village.projectCount > 0), 'village search must use a separate extracted index');
+assert.equal(getMetrics({ district: 'DHOLPUR' }).sourceRecordCount, listProjects({ district: 'DHOLPUR' }).length);
 
 const firstProject = listProjects({})[0];
 assert.equal(getProject(firstProject.id).id, firstProject.id);
