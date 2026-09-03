@@ -4,6 +4,7 @@ import { getMetrics as getLiveMetrics } from './esakshi-source.js';
 import { fetchAndAnalyzeAttachments, fetchAndAnalyzeImages } from './image-analysis.js';
 import { analyzeEvidenceAgainstProject } from './evidence-analysis.js';
 import { persistEvidence } from './persistence/evidence.js';
+import { getDistrictAnalysis, startDistrictAnalysis } from './district-analysis.js';
 
 const port = Number(process.env.PORT || 8000);
 const geocodeCache = new Map();
@@ -41,6 +42,11 @@ function filtersFrom(url) {
 function publicEvidence(evidence) {
   const files = (evidence.files || []).map(({ buffer, ...file }) => file);
   return { ...evidence, files, images: files.filter((file) => file.mimeType?.startsWith('image/')), documents: files };
+}
+
+function publicProject(project) {
+  const { raw, normalized, evidenceItems, signals, attachmentCandidates, imageUrls, attachmentIds, ...safeProject } = project;
+  return { ...safeProject, imageCount: imageUrls.length, attachmentCount: attachmentIds.length };
 }
 
 async function geocodeDistrict(district, state) {
@@ -93,8 +99,22 @@ const server = createServer(async (request, response) => {
     const requestedOffset = Number(url.searchParams.get('offset') || 0);
     const limit = Number.isFinite(requestedLimit) ? Math.min(Math.max(Math.floor(requestedLimit), 1), 200) : 50;
     const offset = Number.isFinite(requestedOffset) ? Math.max(Math.floor(requestedOffset), 0) : 0;
-    const projects = filtered.slice(offset, offset + limit).map(({ raw, normalized, evidenceItems, signals, attachmentCandidates, imageUrls, attachmentIds, ...project }) => ({ ...project, imageCount: imageUrls.length, attachmentCount: attachmentIds.length }));
+    const projects = filtered.slice(offset, offset + limit).map(publicProject);
     return sendJson(response, 200, { data: projects, meta: { count: projects.length, total: filtered.length, limit, offset, hasMore: offset + projects.length < filtered.length, queryVersion: 'catalog-search-v0.2', sourceUpdatedAt: getSourceHealth().sourceFileUpdatedAt } });
+  }
+
+  if (request.method === 'GET' && url.pathname.match(/^\/api\/district-analysis\/[^/]+$/)) {
+    const job = getDistrictAnalysis(url.pathname.split('/').pop());
+    return job ? sendJson(response, 200, { data: job }) : sendJson(response, 404, { error: 'analysis_job_not_found' });
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/district-analysis') {
+    const body = await readBody(request);
+    const filters = { state: body.state || null, district: body.district || null, house: body.house || null, term: body.term || null };
+    if (!filters.district) return sendJson(response, 400, { error: 'district_required', note: 'Choose a district before starting district analysis.' });
+    const projects = listProjects(filters);
+    if (!projects.length) return sendJson(response, 404, { error: 'district_has_no_projects' });
+    return sendJson(response, 202, { data: startDistrictAnalysis(projects, filters), note: 'District evidence analysis queued. Poll the returned job id for ranked results.' });
   }
 
   if (request.method === 'GET' && url.pathname === '/api/map/locations') {
@@ -137,7 +157,7 @@ const server = createServer(async (request, response) => {
   if (projectMatch && request.method === 'GET') {
     const project = getProject(projectMatch[1]);
     if (!project) return sendJson(response, 404, { error: 'project_not_found' });
-    if (projectMatch[2] === 'evidence') return sendJson(response, 200, { data: { projectId: project.id, items: project.evidenceItems, signals: project.signals, imageUrls: project.imageUrls, sourceUrl: project.sourceUrl, fetchTimestamp: project.fetchTimestamp } });
+    if (projectMatch[2] === 'evidence') return sendJson(response, 200, { data: { projectId: project.id, items: project.evidenceItems, signals: project.signals, imageUrls: project.imageUrls, attachmentCount: project.attachmentIds.length, sourceUrl: project.sourceUrl, fetchTimestamp: project.fetchTimestamp } });
     return sendJson(response, 200, { data: project });
   }
 

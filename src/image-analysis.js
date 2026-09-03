@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import sharp from 'sharp';
 
 const maxBytes = 8 * 1024 * 1024;
@@ -86,6 +87,24 @@ export async function fetchAndAnalyzeImages(urls = []) {
   }
   const images = files.filter((file) => file.mimeType?.startsWith('image/'));
   return { files, images, documents: files, comparisons: compareImages(images), errors };
+}
+
+export async function analyzeStoredAttachments(candidates = []) {
+  const files = [];
+  const errors = [];
+  for (const candidate of candidates.slice(0, 4)) {
+    try {
+      if (!candidate.localPath) continue;
+      const buffer = await readFile(candidate.localPath);
+      const mimeType = candidate.mimeType || inferMime(candidate.fileName, buffer).mimeType;
+      const sourceUrl = candidate.sourceUrl || `${candidate.attachmentId ? 'https://mplads.mospi.gov.in/attachment' : 'local-evidence'}/${candidate.attachmentId || ''}`;
+      const base = mimeType.startsWith('image/') ? await analyzeImage(buffer, sourceUrl) : inspectDocument(buffer, sourceUrl, mimeType, candidate.fileName, candidate.attachmentId);
+      files.push({ buffer, sourceAttachmentId: String(candidate.attachmentId || candidate.sourceAttachmentId || ''), fileName: candidate.fileName || null, ...base, persisted: false });
+    } catch (error) { errors.push({ localPath: candidate.localPath, error: error.message }); }
+  }
+  const images = files.filter((file) => file.mimeType?.startsWith('image/'));
+  const documents = files.filter((file) => file.mimeType === 'application/pdf' || !file.mimeType?.startsWith('image/'));
+  return { files, images, documents, comparisons: compareImages(images), errors };
 }
 
 export async function fetchAndAnalyzeAttachments(ids = [], origin = 'https://mplads.gov.in') {
