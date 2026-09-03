@@ -46,7 +46,8 @@ services:
   - type: cron
     name: mpworks-ingest
     runtime: node
-    plan: free
+    # Render cron jobs require a paid plan in this workspace.
+    plan: starter
     region: singapore
     branch: main
     autoDeploy: true
