@@ -2,6 +2,8 @@ import { createServer } from 'node:http';
 import { listProjects, getProject, getSummary, getSourceHealth, getFacets, getSourceMetadata, getMetrics, getVillages } from './catalog.js';
 import { getMetrics as getLiveMetrics } from './esakshi-source.js';
 import { fetchAndAnalyzeAttachments, fetchAndAnalyzeImages } from './image-analysis.js';
+import { analyzeEvidenceAgainstProject } from './evidence-analysis.js';
+import { persistEvidence } from './persistence/evidence.js';
 
 const port = Number(process.env.PORT || 8000);
 const geocodeCache = new Map();
@@ -34,6 +36,11 @@ function filtersFrom(url) {
     category: url.searchParams.get('category'),
     status: url.searchParams.get('status')
   };
+}
+
+function publicEvidence(evidence) {
+  const files = (evidence.files || []).map(({ buffer, ...file }) => file);
+  return { ...evidence, files, images: files.filter((file) => file.mimeType?.startsWith('image/')), documents: files };
 }
 
 async function geocodeDistrict(district, state) {
@@ -113,7 +120,17 @@ const server = createServer(async (request, response) => {
     const evidence = project.imageUrls.length
       ? await fetchAndAnalyzeImages(project.imageUrls)
       : await fetchAndAnalyzeAttachments(project.attachmentIds, attachmentOrigin);
-    return sendJson(response, 200, { data: { projectId: project.id, ...evidence, status: evidence.images.length ? 'analyzed' : 'not-available', note: evidence.images.length ? 'Image metadata and perceptual hashes were calculated from source URLs.' : 'The source record contains no image URL or attachment identifier.' } });
+    let comparison = { status: 'inconclusive', reason: 'No image or PDF evidence was fetched' };
+    let persistence = { r2: 'not-configured', supabase: 'not-configured', stored: [], warnings: [] };
+    if (evidence.files.length) {
+      try { comparison = await analyzeEvidenceAgainstProject(project, evidence.files); } catch (error) { comparison = { status: 'error', reason: error.message }; }
+      try { persistence = await persistEvidence(project, evidence.files, comparison); } catch (error) { persistence = { r2: 'error', supabase: 'error', stored: [], warnings: [error.message] }; }
+    }
+    const files = publicEvidence(evidence);
+    const note = evidence.files.length
+      ? 'Source evidence was fetched. Image/PDF bytes were compared with the project metadata; AI findings are triage signals for human review, not a fraud finding.'
+      : 'The selected source record contains no image or PDF attachment identifier.';
+    return sendJson(response, 200, { data: { projectId: project.id, ...files, comparison, persistence, status: evidence.files.length ? 'analyzed' : 'not-available', note } });
   }
 
   const projectMatch = url.pathname.match(/^\/api\/projects\/([^/]+)(?:\/(evidence|reports))?$/);
