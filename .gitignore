@@ -1,4 +1,8 @@
 node_modules/
 .env
+data/raw/
+data/evidence/
+data/images/
+.env
 *.log
 coverage/

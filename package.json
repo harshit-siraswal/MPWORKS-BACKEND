@@ -5,9 +5,18 @@
   "type": "module",
   "scripts": {
     "start": "node src/server.js",
-    "test": "node tests/smoke-test.mjs"
+    "test": "node tests/smoke-test.mjs",
+    "fetch:mplads": "node scripts/fetch-mplads.mjs",
+    "fetch:mplads:dry": "node scripts/fetch-mplads.mjs --dry-run",
+    "normalize:mplads": "node scripts/normalize-mplads.mjs"
   },
   "engines": {
     "node": ">=18"
+  },
+  "dependencies": {
+    "sharp": "^0.35.4"
+  },
+  "devDependencies": {
+    "playwright": "^1.62.1"
   }
 }

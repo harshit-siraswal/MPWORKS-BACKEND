@@ -6,6 +6,13 @@ assert.ok(summary.total > 0, 'the catalog must contain source records');
 assert.equal(summary.total, getSourceHealth().parsed);
 assert.ok(getFacets().states.length > 0);
 assert.ok(listProjects({ query: 'community' }).length > 0);
+assert.ok(listProjects({ term: '17th Lok Sabha' }).length > 0);
+assert.equal(listProjects({ term: '18th Lok Sabha' }).length, 0, 'the current snapshot must not invent 18th-term rows');
+assert.ok(listProjects({ house: 'Lok Sabha' }).length > 0);
+assert.ok(listProjects({ house: 'Rajya Sabha' }).length > 0);
+const district = listProjects({})[0].district;
+assert.ok(district && listProjects({ district }).length > 1, 'district filter must match the full district, not one block');
+assert.notEqual(listProjects({})[0].district, listProjects({})[0].block, 'district and block must remain separate fields');
 
 const firstProject = listProjects({})[0];
 assert.equal(getProject(firstProject.id).id, firstProject.id);
