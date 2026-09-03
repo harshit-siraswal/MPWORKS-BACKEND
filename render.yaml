@@ -30,6 +30,8 @@ services:
         value: mpworks
       - key: R2_ENDPOINT
         value: https://3df99a00c707520696105ece185c3de8.r2.cloudflarestorage.com
+      - key: R2_PUBLIC_URL
+        value: https://pub-467a5d50e0794a128127f842c9b60c35.r2.dev
       - key: GEMINI_API_KEY
         sync: false
       - key: SUPABASE_URL
@@ -77,6 +79,8 @@ services:
         value: mpworks
       - key: R2_ENDPOINT
         value: https://3df99a00c707520696105ece185c3de8.r2.cloudflarestorage.com
+      - key: R2_PUBLIC_URL
+        value: https://pub-467a5d50e0794a128127f842c9b60c35.r2.dev
       - key: GEMINI_API_KEY
         sync: false
       - key: SUPABASE_URL
