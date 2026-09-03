@@ -25,7 +25,7 @@ The collector uses the official eSAKSHI APIs behind `https://mplads.mospi.gov.in
 
 The live run writes `data/raw/esakshi/projects.csv`, `projects.ndjson`, `metrics.json`, `attachments.ndjson` and `manifest.json`; source files are ignored by Git. A tested one-state run returned both a completion-certificate JPEG and a bill PDF with zero ingestion errors.
 
-The LangGraph graph is configured in `langgraph.json` and exposed as `mplads_ingest`. It orchestrates source discovery, deterministic report collection and an optional Groq anomaly summary. Put `GROQ_API_KEY` in a local `.env`; it is never stored in the repository.
+The LangGraph graph is configured in `langgraph.json` and exposed as `mplads_ingest`. It orchestrates source discovery, deterministic report collection and an optional Gemini anomaly summary. Put `GEMINI_API_KEY` in a local `.env`; it is never stored in the repository.
 
 Supabase schema and RLS policies are in `supabase/migrations/0001_mpworks.sql`. Import normalized data with `npm run import:esakshi` after setting `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`. Upload verified source files to the `mpworks` R2 bucket with `npm run upload:evidence` after setting S3-compatible R2 credentials.
 

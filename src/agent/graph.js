@@ -2,7 +2,6 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readFile } from 'node:fs/promises';
 import { Annotation, END, START, StateGraph } from '@langchain/langgraph';
-import { ChatGroq } from '@langchain/groq';
 import { ESAKSHI_DASHBOARD_URL, getStates, getTenures } from '../esakshi-source.js';
 import { r2Configured } from '../persistence/r2.js';
 import { supabaseConfigured } from '../persistence/supabase.js';
@@ -35,10 +34,20 @@ async function persistRun() {
 }
 
 async function analyzeRun(state) {
-  if (!process.env.GROQ_API_KEY || !state.manifest) return { status: 'skipped', reason: 'GROQ_API_KEY is not configured', sourceFacts: { works: state.manifest?.works || 0, errors: state.manifest?.errors?.length || 0 } };
-  const model = new ChatGroq({ apiKey: process.env.GROQ_API_KEY, model: process.env.GROQ_MODEL || 'openai/gpt-oss-20b', temperature: 0 });
-  const response = await model.invoke(`Review this ingestion manifest as an operations analyst. Do not invent facts; identify only possible scraper anomalies from this JSON: ${JSON.stringify(state.manifest)}`);
-  return { status: 'completed', text: response.content };
+  if (!process.env.GEMINI_API_KEY || !state.manifest) return { status: 'skipped', reason: 'GEMINI_API_KEY is not configured', sourceFacts: { works: state.manifest?.works || 0, errors: state.manifest?.errors?.length || 0 } };
+  const model = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
+    body: JSON.stringify({
+      contents: [{ role: 'user', parts: [{ text: `Review this ingestion manifest as an operations analyst. Do not invent facts; identify only possible scraper anomalies from this JSON: ${JSON.stringify(state.manifest)}` }] }],
+      generationConfig: { temperature: 0 }
+    })
+  });
+  if (!response.ok) throw new Error(`Gemini analysis failed with HTTP ${response.status}: ${await response.text()}`);
+  const payload = await response.json();
+  const text = payload.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('') || '';
+  return { status: 'completed', provider: 'google-gemini', model, text };
 }
 
 const workflow = new StateGraph(State)
