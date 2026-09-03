@@ -102,7 +102,8 @@ export async function fetchAndAnalyzeAttachments(ids = [], origin = 'https://mpl
           const match = value.match(/^data:([^;]+);base64,(.+)$/i);
           if (match) candidates.push({ mimeType: match[1].toLowerCase(), base64: match[2] });
           else if (/^[a-z0-9+/=\r\n]{200,}$/i.test(value) && value.replace(/\s/g, '').length % 4 === 0) candidates.push({ mimeType: null, base64: value.replace(/\s/g, '') });
-        } else if (value && typeof value === 'object') Object.entries(value).forEach(([key, item]) => /image|photo|file|content|data|document|attachment/i.test(key) ? visit(item) : null);
+        } else if (Array.isArray(value)) value.forEach(visit);
+        else if (value && typeof value === 'object') Object.entries(value).forEach(([key, item]) => /image|photo|file|content|data|document|attachment|url/i.test(key) ? visit(item) : null);
       };
       visit(payload);
       for (const candidate of candidates) {
