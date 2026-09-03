@@ -16,6 +16,7 @@
     "import:esakshi": "node scripts/import-esakshi.mjs",
     "upload:evidence": "node scripts/upload-evidence-to-r2.mjs",
     "index:evidence": "node scripts/index-local-evidence.mjs",
+    "prune:esakshi": "node scripts/prune-supabase-esakshi.mjs",
     "upload:catalog": "node scripts/upload-catalog-to-r2.mjs",
     "normalize:mplads": "node scripts/normalize-mplads.mjs"
   },
