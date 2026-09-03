@@ -9,10 +9,13 @@
     "fetch:mplads": "node scripts/fetch-esakshi.mjs",
     "fetch:esakshi": "node scripts/fetch-esakshi.mjs",
     "ingest": "node scripts/run-ingest.mjs",
+    "publish:esakshi": "node scripts/publish-esakshi-reports.mjs",
+    "publish:esakshi:stream": "node scripts/publish-esakshi-stream.mjs",
     "fetch:esakshi:without-attachments": "node scripts/fetch-esakshi.mjs --without-attachments",
     "fetch:mplads:dry": "node scripts/fetch-esakshi.mjs --dry-run",
     "import:esakshi": "node scripts/import-esakshi.mjs",
     "upload:evidence": "node scripts/upload-evidence-to-r2.mjs",
+    "index:evidence": "node scripts/index-local-evidence.mjs",
     "upload:catalog": "node scripts/upload-catalog-to-r2.mjs",
     "normalize:mplads": "node scripts/normalize-mplads.mjs"
   },

@@ -59,7 +59,8 @@ const projects = works.map((row) => ({
   sanction_amount: row.sanctionAmount,
   actual_amount: row.actualAmount,
   letter_no: row.letterNo || null,
-  raw: row.raw || row
+  // Full source rows are retained in R2/NDJSON. Keep only a tiny locator in Postgres.
+  raw: { sourceWorkId: row.sourceWorkId, sourceKey: row.sourceKey || null }
 }));
 const projectRows = await upsertBatched('projects', projects, 'source_work_id,term,house_code');
 const projectIds = new Map(projectRows.map((row) => [`${row.source_work_id}|${row.term}|${row.house_code}`, row.id]));
