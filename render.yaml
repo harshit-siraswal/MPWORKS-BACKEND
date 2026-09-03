@@ -53,7 +53,7 @@ services:
     autoDeploy: true
     schedule: "0 2 * * *"
     buildCommand: npm install
-    startCommand: npm run fetch:esakshi
+    startCommand: npm run ingest
     envVars:
       - key: NODE_ENV
         value: production
