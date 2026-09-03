@@ -134,4 +134,5 @@ const server = createServer(async (request, response) => {
   return sendJson(response, 404, { error: 'route_not_found' });
 });
 
-server.listen(port, '127.0.0.1', () => console.log(`MPLAD Intelligence API listening on http://127.0.0.1:${port}`));
+const host = process.env.HOST || '0.0.0.0';
+server.listen(port, host, () => console.log(`MPLAD Intelligence API listening on http://${host}:${port}`));

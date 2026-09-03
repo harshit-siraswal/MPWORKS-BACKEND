@@ -1,0 +1,88 @@
+services:
+  - type: web
+    name: mpworks-api
+    runtime: node
+    plan: free
+    region: singapore
+    branch: main
+    autoDeploy: true
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MPLADS_SOURCE_URL
+        value: https://mplads.mospi.gov.in/digigov/dashboard.html
+      - key: MPLADS_API_ORIGIN
+        value: https://mplads.mospi.gov.in
+      - key: MPLADS_MAX_STATES
+        value: "0"
+      - key: MPLADS_MAX_WORKS
+        value: "0"
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+      - key: R2_ACCOUNT_ID
+        value: 3df99a00c707520696105ece185c3de8
+      - key: R2_BUCKET
+        value: mpworks
+      - key: R2_ENDPOINT
+        value: https://3df99a00c707520696105ece185c3de8.r2.cloudflarestorage.com
+      - key: GROQ_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_ACCESS_TOKEN
+        sync: false
+      - key: SUPABASE_ORG_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+
+  - type: cron
+    name: mpworks-ingest
+    runtime: node
+    plan: free
+    region: singapore
+    branch: main
+    autoDeploy: true
+    schedule: "0 2 * * *"
+    buildCommand: npm install
+    startCommand: npm run fetch:esakshi
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MPLADS_SOURCE_URL
+        value: https://mplads.mospi.gov.in/digigov/dashboard.html
+      - key: MPLADS_API_ORIGIN
+        value: https://mplads.mospi.gov.in
+      - key: MPLADS_MAX_STATES
+        value: "0"
+      - key: MPLADS_MAX_WORKS
+        value: "0"
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+      - key: R2_ACCOUNT_ID
+        value: 3df99a00c707520696105ece185c3de8
+      - key: R2_BUCKET
+        value: mpworks
+      - key: R2_ENDPOINT
+        value: https://3df99a00c707520696105ece185c3de8.r2.cloudflarestorage.com
+      - key: GROQ_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_ACCESS_TOKEN
+        sync: false
+      - key: SUPABASE_ORG_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
