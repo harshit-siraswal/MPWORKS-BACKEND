@@ -73,7 +73,7 @@ async function main() {
             await writeJson(join(root, `report-${safe(tenure.CAPTION)}-${houseCode}-${safe(state.STATE_NAME)}-${safe(key)}.json`), rows);
             for (const row of rows) {
               const normalized = normalizeWork({ ...row, HOUSE_OF_PARLIAMENT: row.HOUSE_OF_PARLIAMENT ?? houseCode, TENURE: row.TENURE ?? tenure.CAPTION, STATE_NAME: row.STATE_NAME ?? state.STATE_NAME }, key);
-              const keyId = normalized.sourceWorkId || `${combo}-${row.Sno}`;
+              const keyId = normalized.sourceWorkId ? `${normalized.sourceWorkId}|${normalized.term}|${normalized.houseCode}` : `${combo}-${row.Sno}`;
               const previous = allWorks.get(keyId) || { ...normalized, sources: [], attachmentRefs: [] };
               allWorks.set(keyId, { ...previous, ...Object.fromEntries(Object.entries(normalized).filter(([, value]) => value !== null && value !== '')), sources: [...new Set([...previous.sources, key])] });
             }

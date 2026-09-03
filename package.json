@@ -13,6 +13,7 @@
     "fetch:mplads:dry": "node scripts/fetch-esakshi.mjs --dry-run",
     "import:esakshi": "node scripts/import-esakshi.mjs",
     "upload:evidence": "node scripts/upload-evidence-to-r2.mjs",
+    "upload:catalog": "node scripts/upload-catalog-to-r2.mjs",
     "normalize:mplads": "node scripts/normalize-mplads.mjs"
   },
   "engines": {

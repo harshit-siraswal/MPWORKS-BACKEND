@@ -27,9 +27,9 @@ async function scrapeReports() {
 }
 
 async function persistRun() {
-  const result = { supabase: 'skipped: credentials not configured', r2: 'skipped: credentials not configured' };
+  const result = { supabase: 'skipped: credentials not configured', r2: 'skipped: credentials not configured', rawCatalog: 'skipped: R2 credentials not configured' };
   if (supabaseConfigured()) { await exec(process.execPath, ['scripts/import-esakshi.mjs'], { cwd: process.cwd(), env: process.env, maxBuffer: 20 * 1024 * 1024 }); result.supabase = 'completed'; }
-  if (r2Configured()) { await exec(process.execPath, ['scripts/upload-evidence-to-r2.mjs'], { cwd: process.cwd(), env: process.env, maxBuffer: 20 * 1024 * 1024 }); result.r2 = 'completed'; }
+  if (r2Configured()) { await exec(process.execPath, ['scripts/upload-evidence-to-r2.mjs'], { cwd: process.cwd(), env: process.env, maxBuffer: 20 * 1024 * 1024 }); await exec(process.execPath, ['scripts/upload-catalog-to-r2.mjs'], { cwd: process.cwd(), env: process.env, maxBuffer: 20 * 1024 * 1024 }); result.r2 = 'completed'; result.rawCatalog = 'completed'; }
   return result;
 }
 

@@ -7,7 +7,7 @@ assert.equal(summary.total, getSourceHealth().parsed);
 assert.ok(getFacets().states.length > 0);
 assert.ok(listProjects({ query: 'community' }).length > 0);
 assert.ok(listProjects({ term: '17th Lok Sabha' }).length > 0);
-assert.equal(listProjects({ term: '18th Lok Sabha' }).length, 0, 'the current snapshot must not invent 18th-term rows');
+assert.equal(listProjects({ term: '18th Lok Sabha' }).length, getSummary().terms['18th Lok Sabha'], '18th-term rows must come only from the live ingest');
 assert.ok(listProjects({ house: 'Lok Sabha' }).length > 0);
 assert.ok(listProjects({ house: 'Rajya Sabha' }).length > 0);
 const district = listProjects({})[0].district;
