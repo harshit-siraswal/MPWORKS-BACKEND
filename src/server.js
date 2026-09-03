@@ -50,7 +50,7 @@ function publicProject(project) {
 }
 
 function amountFromProject(project, field, normalizedField) {
-  const value = project.raw?.[field] ?? project.normalized?.[normalizedField];
+  const value = project.raw?.[field] ?? project.raw?.[normalizedField] ?? project.normalized?.[normalizedField] ?? (normalizedField === 'recommendedAmount' ? project.normalized?.amountInr : null);
   const amount = Number(String(value ?? '').replace(/[^0-9.-]/g, ''));
   return Number.isFinite(amount) ? amount : 0;
 }
@@ -58,8 +58,8 @@ function amountFromProject(project, field, normalizedField) {
 function districtMetrics(filters) {
   const metrics = getMetrics(filters);
   const scoped = listProjects(filters);
-  metrics.sanctionedAmount = scoped.reduce((sum, project) => sum + amountFromProject(project, 'SANCTION_AMOUNT', 'sanctionAmountInr'), 0) || null;
-  metrics.usedAmount = scoped.reduce((sum, project) => sum + amountFromProject(project, 'ACTUAL_AMOUNT', 'usedAmountInr'), 0) || null;
+  metrics.sanctionedAmount = scoped.reduce((sum, project) => sum + amountFromProject(project, 'SANCTION_AMOUNT', 'sanctionAmount'), 0) || null;
+  metrics.usedAmount = scoped.reduce((sum, project) => sum + amountFromProject(project, 'ACTUAL_AMOUNT', 'actualAmount'), 0) || null;
   return metrics;
 }
 

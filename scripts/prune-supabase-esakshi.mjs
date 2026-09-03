@@ -14,16 +14,19 @@ const currentRows = (await readFile(input, 'utf8')).split(/\r?\n/).filter(Boolea
 const currentKeys = new Set(currentRows.map((row) => `${row.sourceWorkId}|${row.term}|${row.houseCode}`));
 const headers = { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` };
 const staleIds = [];
-let offset = 0;
+let cursor = null;
+let scanned = 0;
 
 while (true) {
-  const query = new URLSearchParams({ select: 'id,source_work_id,term,house_code', order: 'id', limit: String(pageSize), offset: String(offset) });
+  const query = new URLSearchParams({ select: 'id,source_work_id,term,house_code', order: 'id.asc', limit: String(pageSize) });
+  if (cursor) query.set('id', `gt.${cursor}`);
   const response = await fetch(`${baseUrl}/rest/v1/projects?${query}`, { headers });
   if (!response.ok) throw new Error(`Supabase project scan failed with HTTP ${response.status}: ${await response.text()}`);
   const rows = await response.json();
   for (const row of rows) if (!currentKeys.has(`${row.source_work_id}|${row.term}|${row.house_code}`)) staleIds.push(row.id);
+  scanned += rows.length;
   if (rows.length < pageSize) break;
-  offset += pageSize;
+  cursor = rows.at(-1).id;
 }
 
 for (let index = 0; index < staleIds.length; index += 200) {
@@ -34,4 +37,4 @@ for (let index = 0; index < staleIds.length; index += 200) {
   console.log(JSON.stringify({ deleted: Math.min(index + batch.length, staleIds.length), total: staleIds.length }));
 }
 
-console.log(JSON.stringify({ scanned: offset + pageSize, currentRegister: currentRows.length, deleted: staleIds.length }, null, 2));
+console.log(JSON.stringify({ scanned, currentRegister: currentRows.length, deleted: staleIds.length }, null, 2));
