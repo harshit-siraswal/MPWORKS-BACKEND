@@ -189,6 +189,14 @@ async function runEvidenceJob(project) {
     // public payload after persistence so clients never receive a stale proxy
     // URL built from a SHA-256 content hash.
     const persistedFiles = publicEvidenceForProject(evidence, project.id);
+    if (evidence.files.length) {
+      // Keep the in-process catalog consistent with the evidence endpoint so
+      // MP profiles and work tables stop showing 0 immediately after a
+      // successful on-demand fetch. The permanent source of truth remains R2.
+      project.attachmentCandidates = persistedFiles.files.map(({ url, ...file }) => ({ ...file, r2Url: file.r2Url || url }));
+      project.attachmentIds = [...new Set(persistedFiles.files.map((file) => file.sourceAttachmentId).filter(Boolean))];
+      project.imageUrls = persistedFiles.images.map((file) => file.url).filter(Boolean);
+    }
     Object.assign(job, { status: 'analyzed', note: 'Source evidence was fetched. Image/PDF bytes were compared with the project metadata; AI findings are triage signals for human review, not a fraud finding.', ...persistedFiles, comparison, riskIndex: riskIndex(project, comparison, evidence.files.length), persistence });
   } catch (error) {
     Object.assign(job, { status: 'failed', error: error.message, note: 'The official source or storage service was temporarily unavailable. Retry this record; no mock evidence was substituted.' });
