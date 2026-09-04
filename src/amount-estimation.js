@@ -14,7 +14,13 @@ const COST_BANDS = [
 
 function textFor(project) {
   const raw = project?.raw || {};
-  return [project?.title, project?.category, raw.WORK, raw.WORK_DESCRIPTION, raw.description, raw.activityName, raw.ACTIVITY_NAME]
+  return [project?.title, raw.WORK, raw.WORK_DESCRIPTION, raw.description, raw.activityName, raw.ACTIVITY_NAME, project?.category]
+    .filter(Boolean).join(' ').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function primaryTextFor(project) {
+  const raw = project?.raw || {};
+  return [project?.title, raw.WORK, raw.WORK_DESCRIPTION, raw.description, raw.activityName, raw.ACTIVITY_NAME]
     .filter(Boolean).join(' ').replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
@@ -52,7 +58,9 @@ function rounded(value) { return Math.round(value / 1000) * 1000; }
 
 export function estimateProjectAmount(project) {
   const text = textFor(project);
-  const band = COST_BANDS.find((candidate) => candidate.keys.some((key) => text.includes(key)));
+  const primaryText = primaryTextFor(project);
+  const band = COST_BANDS.find((candidate) => candidate.keys.some((key) => primaryText.includes(key)))
+    || COST_BANDS.find((candidate) => candidate.keys.some((key) => text.includes(key)));
   const base = band?.base || 800000;
   const { multiplier, quantity } = quantityMultiplier(text);
   const point = rounded(Math.max(50000, Math.min(base * multiplier, 50000000)));

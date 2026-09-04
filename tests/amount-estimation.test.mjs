@@ -21,3 +21,8 @@ test('returns a transparent fallback when source amount is unavailable', () => {
   assert.equal(result.variancePercent, null);
   assert.match(result.reason, /No specific work category/);
 });
+
+test('prioritizes the work description over a conflicting source category', () => {
+  const result = estimateProjectAmount({ title: 'Construction of roads and drainage system', category: 'Water supply', raw: {} });
+  assert.match(result.reason, /road and pavement/);
+});
