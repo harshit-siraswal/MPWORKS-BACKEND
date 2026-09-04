@@ -46,6 +46,12 @@ const existingWorkKeys = new Set(existing.map((row) => {
   const pathState = evidenceIndex >= 0 ? parts[evidenceIndex + 2]?.replaceAll('-', ' ') : '';
   return `${row.sourceWorkId}|${row.term}|${row.houseCode}|${row.state || pathState || ''}`;
 }));
+const existingWorkIdentities = new Set(existing.map((row) => {
+  const parts = String(row.localPath || '').replaceAll('\\\\', '/').split('/');
+  const evidenceIndex = parts.indexOf('esakshi');
+  const pathState = evidenceIndex >= 0 ? parts[evidenceIndex + 2]?.replaceAll('-', ' ') : '';
+  return `${row.sourceWorkId}|${row.state || pathState || ''}`;
+}));
 const existingHashes = new Set(existing.map((row) => row.sha256).filter(Boolean));
 const existingByHash = new Map(existing.filter((row) => row.sha256 && row.r2Key).map((row) => [row.sha256, row]));
 const works = new Map();
@@ -63,7 +69,7 @@ for (const file of files) {
     const stageText = `${work.stage} ${file}`;
     if (!work.sourceWorkId || !work.fileStatus || (requestedSourceWorkId && work.sourceWorkId !== requestedSourceWorkId) || !/(completed|partially|ongoing|progress|sanctioned|recommended)/i.test(stageText)) continue;
     const key = `${work.sourceWorkId}|${work.term}|${work.houseCode}|${work.state}`;
-    if (!existingWorkKeys.has(key)) {
+    if (!existingWorkKeys.has(key) && !existingWorkIdentities.has(`${work.sourceWorkId}|${work.state}`)) {
       const previous = works.get(key) || { work, raws: [] };
       works.set(key, { work, raws: [...previous.raws, raw] });
     }
@@ -113,6 +119,7 @@ async function processWork({ work, raws }) {
     } catch (error) { failures += 1; console.error(JSON.stringify({ sourceWorkId: work.sourceWorkId, attachmentId: ref.id, error: error.message })); }
   }
   existingWorkKeys.add(`${work.sourceWorkId}|${work.term}|${work.houseCode}|${work.state}`);
+  existingWorkIdentities.add(`${work.sourceWorkId}|${work.state}`);
   processed += 1;
   if (!workFiles) console.log(JSON.stringify({ sourceWorkId: work.sourceWorkId, state: work.state, sourceKey: work.sourceKey, rawAttachId: raws.map((raw) => raw.ATTACH_ID), rawWorkId: raws.map((raw) => raw.WORK_ID), refDiagnostics, uniqueReferences: refs.size }));
   if (processed % 25 === 0 || processed === targets.length) console.log(JSON.stringify({ processed, total: targets.length, discovered, failures, lastSourceWorkId: work.sourceWorkId, lastWorkFiles: workFiles }));
