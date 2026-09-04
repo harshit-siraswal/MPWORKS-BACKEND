@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
+import { attachmentIdsFromReferenceRows, getAttachment, getAttachmentReferences, getStates, getTenures, getWorkReport, getMetrics as getLiveMetrics } from './esakshi-source.js';
 import { listProjects, getProject, getSummary, getSourceHealth, getFacets, getSourceMetadata, getMetrics, getVillages, getMembers, getMember } from './catalog.js';
-import { getMetrics as getLiveMetrics } from './esakshi-source.js';
 import { analyzeStoredAttachments, fetchAndAnalyzeAttachments, fetchAndAnalyzeImages } from './image-analysis.js';
 import { analyzeEvidenceAgainstProject } from './evidence-analysis.js';
 import { persistEvidence } from './persistence/evidence.js';
@@ -9,6 +9,7 @@ import { getDistrictAnalysis, startDistrictAnalysis } from './district-analysis.
 const port = Number(process.env.PORT || 8000);
 const geocodeCache = new Map();
 const memberImageCache = new Map();
+const recoveredSourceCache = new Map();
 
 function sendJson(response, status, payload) {
   response.writeHead(status, {
@@ -57,7 +58,90 @@ async function findMemberImage(member) {
 
 function publicEvidence(evidence) {
   const files = (evidence.files || []).map(({ buffer, ...file }) => file);
-  return { ...evidence, files, images: files.filter((file) => file.mimeType?.startsWith('image/')), documents: files };
+  return { ...evidence, files, images: files.filter((file) => file.mimeType?.startsWith('image/')), documents: files.filter((file) => file.mimeType === 'application/pdf' || !file.mimeType?.startsWith('image/')) };
+}
+
+function sourceWorkIdCandidates(project) {
+  const raw = project?.raw || {};
+  const values = [raw.WORK_RECOMMENDATION_DTL_ID, raw.WORK_ID, raw.sourceWorkId, project?.title, raw.WORK];
+  const ids = [];
+  for (const value of values) {
+    const text = String(value ?? '').trim();
+    if (/^\d+$/.test(text)) ids.push(text);
+    const match = [...text.matchAll(/(?:^|\/)\s*([0-9]+)\s*-\s*/g)].at(-1);
+    if (match?.[1]) ids.push(match[1]);
+  }
+  return [...new Set(ids)];
+}
+
+function sourcePayload(project, row) {
+  return { ...row, WORK_RECOMMENDATION_DTL_ID: row.WORK_RECOMMENDATION_DTL_ID || sourceWorkIdCandidates(project)[0], HOUSE_OF_PARLIAMENT: row.HOUSE_OF_PARLIAMENT || (project.house === 'Rajya Sabha' ? '1' : '2'), TENURE: row.TENURE || project.term, STATE_NAME: row.STATE_NAME || project.state, MP_NAME: row.MP_NAME || project.mp, CONSTITUENCY: row.CONSTITUENCY || project.constituency, FLAG: row.FLAG ?? null, FILE_STATUS: row.FILE_STATUS ?? true };
+}
+
+async function recoverSourceProject(project) {
+  const sourceId = sourceWorkIdCandidates(project)[0];
+  if (!sourceId) return null;
+  const cacheKey = `${sourceId}|${project.term}|${project.house}|${project.state}`;
+  if (recoveredSourceCache.has(cacheKey)) return recoveredSourceCache.get(cacheKey);
+  try {
+    const states = await getStates();
+    const state = states.find((item) => String(item.STATE_NAME || '').trim().toLowerCase() === String(project.state || '').trim().toLowerCase());
+    const houseCode = project.house === 'Rajya Sabha' ? '1' : '2';
+    const tenures = await getTenures(Number(houseCode));
+    const tenure = tenures.find((item) => String(item.CAPTION || '').toLowerCase() === String(project.term || '').toLowerCase());
+    if (!state?.STATE_ID || !tenure) return null;
+    const combo = `${state.STATE_ID},0,0,${houseCode},${tenure.ID}`;
+    for (const key of ['Works Completed', 'Works Sanctioned', 'Works Recommended']) {
+      const rows = await getWorkReport(combo, key);
+      const row = rows.find((item) => String(item.WORK_RECOMMENDATION_DTL_ID ?? item.WORK_ID ?? '') === sourceId);
+      if (row) { const recovered = { sourceId, raw: { ...row, sourceKey: key } }; recoveredSourceCache.set(cacheKey, recovered); return recovered; }
+    }
+  } catch { /* the normal snapshot response remains available if the official source is down */ }
+  return null;
+}
+
+async function attachmentIdsFor(project, raw) {
+  const refs = [];
+  const flags = [...new Set([raw?.FLAG, 1, 2, 3].map(Number).filter(Number.isFinite))];
+  for (const flag of flags) {
+    try { refs.push(...attachmentIdsFromReferenceRows(await getAttachmentReferences(raw, flag))); } catch { /* try the next official flag */ }
+  }
+  return [...new Map([...refs, ...attachmentIdsFromReferenceRows([raw])].filter((item) => item.id).map((item) => [item.id, item])).values()];
+}
+
+function attachmentProxyUrl(projectId, attachmentId) { return `/api/projects/${encodeURIComponent(projectId)}/evidence/attachment/${encodeURIComponent(attachmentId)}`; }
+
+function publicEvidenceForProject(evidence, projectId) {
+  const result = publicEvidence(evidence);
+  result.files = result.files.map((file) => ({ ...file, url: file.r2Url || (file.sourceAttachmentId ? attachmentProxyUrl(projectId, file.sourceAttachmentId) : file.sourceUrl) }));
+  result.images = result.files.filter((file) => file.mimeType?.startsWith('image/'));
+  result.documents = result.files.filter((file) => file.mimeType === 'application/pdf' || !file.mimeType?.startsWith('image/'));
+  return result;
+}
+
+function evidenceItemsForProject(project, attachmentCount) {
+  return (project.evidenceItems || []).map((item) => item.type === 'image' ? { ...item, status: attachmentCount ? 'available' : item.status } : item);
+}
+
+function decodeAttachmentValue(value) {
+  if (typeof value !== 'string' || value === 'N/A') return null;
+  const match = value.match(/^data:[^;]+;base64,(.*)$/i);
+  const base64 = (match ? match[1] : value).replace(/\s/g, '');
+  if (!/^[a-z0-9+/=]+$/i.test(base64) || base64.length < 20) return null;
+  const buffer = Buffer.from(base64, 'base64');
+  return buffer.length ? buffer : null;
+}
+
+async function fetchAttachmentBinary(id) {
+  const rows = await getAttachment(id);
+  for (const row of rows) for (const key of ['URL', 'url', 'CONTENT', 'content', 'DATA', 'data', 'FILE_DATA', 'fileData', 'DOCUMENT']) {
+    const buffer = decodeAttachmentValue(row?.[key]);
+    if (!buffer) continue;
+    const fileName = row.FILE_NAME || row.fileName || 'evidence';
+    const mimeType = buffer.subarray(0, 4).toString() === '%PDF' || /\.pdf$/i.test(fileName) ? 'application/pdf' : buffer.subarray(0, 3).toString('hex') === 'ffd8ff' ? 'image/jpeg' : buffer.subarray(0, 8).toString('hex') === '89504e470d0a1a0a' ? 'image/png' : 'application/octet-stream';
+    return { buffer, fileName, mimeType };
+  }
+  return null;
 }
 
 function publicProject(project) {
@@ -200,27 +284,61 @@ const server = createServer(async (request, response) => {
     return sendJson(response, 200, { data: { points, totalMatches: filtered.length, precision: 'District locations are approximate; the source does not publish project coordinates.', mapSource: 'OpenStreetMap Nominatim', message: candidates.length ? (points.length ? null : 'The map provider did not return a location for this district.') : 'Select a state or district to place source records on the map.' } });
   }
 
+  if (request.method === 'GET' && url.pathname === '/api/map/reverse') {
+    const lat = Number(url.searchParams.get('lat'));
+    const lon = Number(url.searchParams.get('lon'));
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) return sendJson(response, 400, { error: 'invalid_coordinates' });
+    try {
+      const reverseUrl = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=18&addressdetails=1&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`;
+      const reverseResponse = await fetch(reverseUrl, { headers: { 'User-Agent': 'MPWorks/0.1 public-administration-map' }, signal: AbortSignal.timeout(12_000) });
+      if (!reverseResponse.ok) throw new Error(`geocoder returned ${reverseResponse.status}`);
+      const payload = await reverseResponse.json();
+      const address = payload.address || {};
+      return sendJson(response, 200, { data: { lat, lon, state: address.state || null, district: address.state_district || address.district || address.county || address.city_district || null, area: address.village || address.town || address.suburb || address.city || address.municipality || null, displayName: payload.display_name || null, precision: 'Map pin is user-selected; source records remain district/area matched.' } });
+    } catch (error) { return sendJson(response, 502, { error: 'reverse_geocode_unavailable', detail: error.message }); }
+  }
+
   const refreshMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/evidence\/refresh$/);
   if (refreshMatch && request.method === 'POST') {
     const project = getProject(refreshMatch[1]);
     if (!project) return sendJson(response, 404, { error: 'project_not_found' });
-    const attachmentOrigin = process.env.MPLADS_API_ORIGIN || 'https://mplads.gov.in';
-    const evidence = project.attachmentCandidates?.length
-      ? await analyzeStoredAttachments(project.attachmentCandidates)
-      : project.imageUrls.length
-      ? await fetchAndAnalyzeImages(project.imageUrls)
-      : await fetchAndAnalyzeAttachments(project.attachmentIds, attachmentOrigin);
-    let comparison = { status: 'inconclusive', reason: 'No image or PDF evidence was fetched' };
-    let persistence = { r2: 'not-configured', supabase: 'not-configured', stored: [], warnings: [] };
-    if (evidence.files.length) {
-      try { comparison = await analyzeEvidenceAgainstProject(project, evidence.files); } catch (error) { comparison = { status: 'error', reason: error.message }; }
-      try { persistence = await persistEvidence(project, evidence.files, comparison); } catch (error) { persistence = { r2: 'error', supabase: 'error', stored: [], warnings: [error.message] }; }
+    try {
+      const recovered = await recoverSourceProject(project);
+      const sourceProject = recovered ? { ...project, raw: recovered.raw, attachmentIds: [], attachmentCandidates: [] } : project;
+      const sourceRefs = recovered ? await attachmentIdsFor(project, recovered.raw) : project.attachmentIds.map((id) => ({ id }));
+      sourceProject.attachmentIds = sourceRefs.map((item) => item.id).filter(Boolean);
+      const attachmentOrigin = process.env.MPLADS_API_ORIGIN || 'https://mplads.mospi.gov.in';
+      const evidence = sourceProject.attachmentCandidates?.length
+        ? await analyzeStoredAttachments(sourceProject.attachmentCandidates)
+        : sourceProject.imageUrls.length
+        ? await fetchAndAnalyzeImages(sourceProject.imageUrls)
+        : await fetchAndAnalyzeAttachments(sourceProject.attachmentIds, attachmentOrigin);
+      let comparison = { status: 'inconclusive', reason: 'No image or PDF evidence was fetched' };
+      let persistence = { r2: 'not-configured', supabase: 'not-configured', stored: [], warnings: [] };
+      if (evidence.files.length) {
+        try { comparison = await analyzeEvidenceAgainstProject(project, evidence.files); } catch (error) { comparison = { status: 'error', reason: error.message }; }
+        try { persistence = await persistEvidence(sourceProject, evidence.files, comparison); } catch (error) { persistence = { r2: 'error', supabase: 'error', stored: [], warnings: [error.message] }; }
+      }
+      const files = publicEvidenceForProject(evidence, project.id);
+      const note = evidence.files.length
+        ? 'Source evidence was fetched. Image/PDF bytes were compared with the project metadata; AI findings are triage signals for human review, not a fraud finding.'
+        : sourceProject.attachmentIds.length ? 'The official source returned attachment identifiers, but no readable image or PDF payload was returned.' : 'The live source record does not expose an image or PDF attachment identifier.';
+      return sendJson(response, 200, { data: { projectId: project.id, liveSourceWorkId: recovered?.sourceId || null, attachmentIds: sourceProject.attachmentIds, ...files, comparison, persistence, status: evidence.files.length ? 'analyzed' : 'not-available', note } });
+    } catch (error) {
+      return sendJson(response, 503, { error: 'evidence_refresh_unavailable', detail: error.message, note: 'The official source or storage service was temporarily unavailable. Retry this record; no mock evidence was substituted.' });
     }
-    const files = publicEvidence(evidence);
-    const note = evidence.files.length
-      ? 'Source evidence was fetched. Image/PDF bytes were compared with the project metadata; AI findings are triage signals for human review, not a fraud finding.'
-      : 'The selected source record contains no image or PDF attachment identifier.';
-    return sendJson(response, 200, { data: { projectId: project.id, ...files, comparison, persistence, status: evidence.files.length ? 'analyzed' : 'not-available', note } });
+  }
+
+  const attachmentMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/evidence\/attachment\/([^/]+)$/);
+  if (attachmentMatch && request.method === 'GET') {
+    const project = getProject(decodeURIComponent(attachmentMatch[1]));
+    if (!project) return sendJson(response, 404, { error: 'project_not_found' });
+    try {
+      const attachment = await fetchAttachmentBinary(decodeURIComponent(attachmentMatch[2]));
+      if (!attachment) return sendJson(response, 404, { error: 'attachment_payload_not_found' });
+      response.writeHead(200, { 'Content-Type': attachment.mimeType, 'Content-Length': attachment.buffer.length, 'Cache-Control': 'private, max-age=300', 'Content-Disposition': `inline; filename="${String(attachment.fileName || 'evidence').replace(/[^a-z0-9._-]/gi, '_')}"` });
+      return response.end(attachment.buffer);
+    } catch (error) { return sendJson(response, 502, { error: 'attachment_fetch_failed', detail: error.message }); }
   }
 
   const projectMatch = url.pathname.match(/^\/api\/projects\/([^/]+)(?:\/(evidence|reports))?$/);
@@ -229,7 +347,10 @@ const server = createServer(async (request, response) => {
     if (!project) return sendJson(response, 404, { error: 'project_not_found' });
     if (projectMatch[2] === 'evidence') {
       const files = (project.attachmentCandidates || []).map(({ localPath, ...file }) => ({ ...file, sourceAttachmentId: file.attachmentId || file.sourceAttachmentId || null, status: file.r2Url ? 'stored' : 'discovered' }));
-      return sendJson(response, 200, { data: { projectId: project.id, items: project.evidenceItems, signals: project.signals, files, images: files.filter((file) => file.mimeType?.startsWith('image/')), documents: files.filter((file) => file.mimeType === 'application/pdf'), imageUrls: files.map((file) => file.r2Url).filter(Boolean), attachmentCount: files.length || project.attachmentIds.length, sourceUrl: project.sourceUrl, fetchTimestamp: project.fetchTimestamp } });
+      const recovered = files.length || project.attachmentIds.length ? null : await recoverSourceProject(project);
+      const sourceRefs = recovered ? await attachmentIdsFor(project, recovered.raw) : project.attachmentIds.map((id) => ({ id }));
+      const publicFiles = files.map((file) => ({ ...file, url: file.r2Url || (file.sourceAttachmentId ? attachmentProxyUrl(project.id, file.sourceAttachmentId) : file.sourceUrl) }));
+      return sendJson(response, 200, { data: { projectId: project.id, liveSourceWorkId: recovered?.sourceId || null, attachmentIds: sourceRefs.map((item) => item.id).filter(Boolean), items: evidenceItemsForProject(project, publicFiles.length || sourceRefs.length), signals: project.signals, files: publicFiles, images: publicFiles.filter((file) => file.mimeType?.startsWith('image/')), documents: publicFiles.filter((file) => file.mimeType === 'application/pdf'), imageUrls: publicFiles.map((file) => file.url).filter(Boolean), attachmentCount: publicFiles.length || sourceRefs.length, sourceUrl: project.sourceUrl, fetchTimestamp: project.fetchTimestamp } });
     }
     return sendJson(response, 200, { data: project });
   }

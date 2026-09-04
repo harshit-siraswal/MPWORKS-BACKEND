@@ -27,7 +27,11 @@ The live run writes `data/raw/esakshi/projects.csv`, `projects.ndjson`, `metrics
 
 The LangGraph graph is configured in `langgraph.json` and exposed as `mplads_ingest`. It orchestrates source discovery, deterministic report collection and an optional Gemini anomaly summary. Put `GEMINI_API_KEY` in a local `.env`; it is never stored in the repository.
 
-Supabase schema and RLS policies are in `supabase/migrations/0001_mpworks.sql`. Import normalized data with `npm run import:esakshi` after setting `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`. Upload verified source files to the `mpworks` R2 bucket with `npm run upload:evidence` after setting S3-compatible R2 credentials.
+Supabase schema and RLS policies are in `supabase/migrations/0001_mpworks.sql` and the durable ingestion control plane is in `supabase/migrations/0002_agentic_ingestion.sql`. Run the end-to-end agent with `npm run agent:ingest` after setting `SUPABASE_URL`, either the preferred `SUPABASE_SECRET_KEY` or legacy `SUPABASE_SERVICE_ROLE_KEY`, and the R2 secrets. It writes immutable raw source artifacts under `mplads/raw/...`, verified evidence under `mplads/documents/...`, and catalogs metadata in Supabase. Use `MPLADS_MAX_STATES=1 MPLADS_MAX_WORKS=2` for a bounded connectivity test.
+
+The R2 integration uses the S3-compatible endpoint derived from `R2_ACCOUNT_ID` and the public delivery host in `R2_PUBLIC_BASE_URL`. Keep all R2 access keys and the Supabase service key in local/deployment secrets; do not put them in the frontend or Git.
+
+For a hosted worker, add `R2_ACCOUNT_ID`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_PUBLIC_BASE_URL`, and `OCR_CACHE_PREFIX` to the deployment secret store. Supabase Edge Functions expose project secrets through environment variables; the current Node worker instead reads the ignored root `.env` file. The dedicated MPWORKS Supabase project URL is `https://wqtegmhjizynqpmiyaxb.supabase.co`. Use `npm run agent:ingest:without-attachments` for the first national metadata pass; the default command also retrieves permitted source attachments.
 
 `normalize-mplads.mjs` converts HTML work-register exports into a semicolon-delimited source file and preserves `HOUSE`, `TERM`, and `SOURCE_FILE`. To run the API on a freshly normalized file:
 
@@ -43,7 +47,8 @@ The government host can be intermittent; the collector retries each API request 
 - `GET /api/projects?house=&term=&state=&district=&category=&query=&limit=&offset=`
 - `GET /api/projects/:id`
 - `GET /api/projects/:id/evidence`
-- `POST /api/projects/:id/evidence/refresh` downloads and analyzes source image URLs when present
+- `POST /api/projects/:id/evidence/refresh` resolves the live eSAKSHI work ID, fetches official JPEG/PNG/PDF attachments, analyzes images, and stores them in R2 when configured
+- `GET /api/projects/:id/evidence/attachment/:attachmentId` provides a bounded source proxy for attachments that have not yet been copied to R2
 - `POST /api/projects/:id/reports`
 - `GET /api/map/locations` returns explicitly labelled district approximations from OpenStreetMap Nominatim
 - `GET /api/catalog/summary`
@@ -54,7 +59,7 @@ The government host can be intermittent; the collector retries each API request 
 - `GET /api/source-health`
 - `GET /api/methodology`
 
-Image analysis uses Sharp to calculate format, dimensions, SHA-256, dominant colour and a perceptual average hash. Similarity is an evidence signal only; it is not a fraud conclusion. The snapshot has no attachment URLs, so its image coverage correctly remains `0%` and individual records say `not-in-source`.
+Image analysis uses Sharp to calculate format, dimensions, SHA-256, dominant colour and a perceptual average hash. Similarity is an evidence signal only; it is not a fraud conclusion. The legacy snapshot has no attachment URLs, so evidence refresh resolves the selected row against the live Supabase catalog and official eSAKSHI report before deciding whether attachments are available.
 
 ## Provenance
 

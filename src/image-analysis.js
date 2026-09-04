@@ -107,7 +107,7 @@ export async function analyzeStoredAttachments(candidates = []) {
   return { files, images, documents, comparisons: compareImages(images), errors };
 }
 
-export async function fetchAndAnalyzeAttachments(ids = [], origin = 'https://mplads.gov.in') {
+export async function fetchAndAnalyzeAttachments(ids = [], origin = 'https://mplads.mospi.gov.in') {
   const files = [];
   const errors = [];
   for (const id of [...new Set(ids)].slice(0, 12)) {
@@ -116,25 +116,29 @@ export async function fetchAndAnalyzeAttachments(ids = [], origin = 'https://mpl
       if (!response.ok) throw new Error(`attachment request failed: ${response.status}`);
       const payload = await response.json();
       const candidates = [];
-      const visit = (value) => {
+      const visit = (value, fileName = '', mimeType = '') => {
         if (typeof value === 'string') {
           const match = value.match(/^data:([^;]+);base64,(.+)$/i);
-          if (match) candidates.push({ mimeType: match[1].toLowerCase(), base64: match[2] });
-          else if (/^[a-z0-9+/=\r\n]{200,}$/i.test(value) && value.replace(/\s/g, '').length % 4 === 0) candidates.push({ mimeType: null, base64: value.replace(/\s/g, '') });
-        } else if (Array.isArray(value)) value.forEach(visit);
-        else if (value && typeof value === 'object') Object.entries(value).forEach(([key, item]) => /image|photo|file|content|data|document|attachment|url/i.test(key) ? visit(item) : null);
+          if (match) candidates.push({ mimeType: match[1].toLowerCase(), base64: match[2], fileName });
+          else if (/^[a-z0-9+/=\r\n]{20,}$/i.test(value) && value.replace(/\s/g, '').length % 4 === 0) candidates.push({ mimeType: mimeType || null, base64: value.replace(/\s/g, ''), fileName });
+        } else if (Array.isArray(value)) value.forEach((item) => visit(item, fileName, mimeType));
+        else if (value && typeof value === 'object') {
+          const localName = value.FILE_NAME || value.fileName || value.filename || fileName;
+          const localMime = value.MIME_TYPE || value.mimeType || value.CONTENT_TYPE || mimeType;
+          Object.entries(value).forEach(([key, item]) => /image|photo|file|content|data|document|attachment|url/i.test(key) ? visit(item, String(localName || ''), String(localMime || '')) : null);
+        }
       };
       visit(payload);
       for (const candidate of candidates) {
         const buffer = Buffer.from(candidate.base64, 'base64');
         if (buffer.byteLength > maxBytes) { errors.push({ id, error: 'attachment exceeds 8 MB safety limit' }); continue; }
         const inferred = inferMime('', buffer);
-        const mimeType = candidate.mimeType && candidate.mimeType !== 'image/unknown' ? candidate.mimeType : inferred.mimeType;
+        const mimeType = candidate.mimeType && candidate.mimeType !== 'image/unknown' && candidate.mimeType !== 'application/octet-stream' ? candidate.mimeType : inferred.mimeType;
         const sourceUrl = `${origin}/attachment/${id}`;
-        const base = mimeType.startsWith('image/') ? await analyzeImage(buffer, sourceUrl) : inspectDocument(buffer, sourceUrl, mimeType, null, id);
-        files.push({ buffer, sourceAttachmentId: String(id), mimeType, ...base, persisted: false });
+        const base = mimeType.startsWith('image/') ? await analyzeImage(buffer, sourceUrl) : inspectDocument(buffer, sourceUrl, mimeType, candidate.fileName || null, id);
+        files.push({ buffer, sourceAttachmentId: String(id), fileName: candidate.fileName || null, mimeType, ...base, persisted: false });
       }
-      if (!candidates.length) errors.push({ id, error: 'attachment response contained no image payload' });
+      if (!candidates.length) errors.push({ id, error: 'attachment response contained no image or PDF payload' });
     } catch (error) { errors.push({ id, error: error.message }); }
   }
   const images = files.filter((file) => file.mimeType?.startsWith('image/'));

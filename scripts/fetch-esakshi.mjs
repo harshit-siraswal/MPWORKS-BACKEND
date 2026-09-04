@@ -55,22 +55,28 @@ async function main() {
   const metrics = [];
   const attachments = [];
   const errors = [];
+  const partitions = [];
   const states = await getStates();
   const selectedStates = states.filter((state) => !requestedState || String(state.STATE_ID) === requestedState).slice(0, maxStates || states.length);
   const reportKeys = ['Works Recommended', 'Works Sanctioned', 'Works Completed'];
+  await writeJson(join(root, 'reference-states.json'), states);
 
   for (const houseCode of houses) {
     let tenures = await getTenures(houseCode);
     if (requestedTenure) tenures = tenures.filter((tenure) => String(tenure.ID) === requestedTenure);
+    await writeJson(join(root, `reference-tenures-${houseCode}.json`), tenures);
     for (const tenure of tenures) {
       for (const state of selectedStates) {
         const combo = `${state.STATE_ID},0,0,${houseCode},${tenure.ID}`;
+        const partition = { partitionKey: `${houseCode}/${tenure.ID}/${state.STATE_ID}`, houseCode: String(houseCode), tenureId: String(tenure.ID), tenure: tenure.CAPTION, stateSourceId: String(state.STATE_ID), stateName: state.STATE_NAME, status: 'running', counts: { metrics: 0, reports: 0, errors: 0 } };
         try {
           const stateMetrics = await getMetrics(combo);
           metrics.push({ combo, stateId: String(state.STATE_ID), state: state.STATE_NAME, houseCode, tenureId: tenure.ID, tenure: tenure.CAPTION, payload: stateMetrics });
+          partition.counts.metrics = 1;
           for (const key of reportKeys) {
             const rows = await getWorkReport(combo, key);
             await writeJson(join(root, `report-${safe(tenure.CAPTION)}-${houseCode}-${safe(state.STATE_NAME)}-${safe(key)}.json`), rows);
+            partition.counts.reports += rows.length;
             for (const row of rows) {
               const normalized = normalizeWork({ ...row, HOUSE_OF_PARLIAMENT: row.HOUSE_OF_PARLIAMENT ?? houseCode, TENURE: row.TENURE ?? tenure.CAPTION, STATE_NAME: row.STATE_NAME ?? state.STATE_NAME }, key);
               const keyId = normalized.sourceWorkId ? `${normalized.sourceWorkId}|${normalized.term}|${normalized.houseCode}` : `${combo}-${row.Sno}`;
@@ -78,9 +84,14 @@ async function main() {
               allWorks.set(keyId, { ...previous, ...Object.fromEntries(Object.entries(normalized).filter(([, value]) => value !== null && value !== '')), sources: [...new Set([...previous.sources, key])] });
             }
           }
+          partition.status = 'completed';
         } catch (error) {
+          partition.status = 'failed';
+          partition.counts.errors += 1;
+          partition.error = error.message;
           errors.push({ combo, state: state.STATE_NAME, tenure: tenure.CAPTION, error: error.message });
         }
+        partitions.push(partition);
       }
     }
   }
@@ -92,14 +103,17 @@ async function main() {
       const flags = [...new Set([work.flag, 1, 2, 3].filter((flag) => Number.isFinite(flag)))];
       for (const flag of flags) {
         try {
-          const refs = attachmentIdsFromReferenceRows(await getAttachmentReferences(work.raw || work, flag));
+          const referenceRows = await getAttachmentReferences(work.raw || work, flag);
+          const refs = attachmentIdsFromReferenceRows(referenceRows).length
+            ? attachmentIdsFromReferenceRows(referenceRows)
+            : attachmentIdsFromReferenceRows([work.raw || work]);
           for (const ref of refs) {
             if (!ref.id) continue;
             const payloadRows = await getAttachment(ref.id);
             for (const payloadRow of payloadRows) {
               const buffer = base64FromAttachment(payloadRow);
               if (!buffer) continue;
-              const info = inferMime(payloadRow.FILE_NAME || ref.fileName, buffer);
+              const info = inferMime(payloadRow.FILE_NAME || payloadRow.fileName || ref.fileName, buffer);
               const digest = sha256(buffer);
               const dir = join(evidenceRoot, safe(work.term), safe(work.state), safe(work.sourceWorkId));
               await mkdir(dir, { recursive: true });
@@ -120,7 +134,7 @@ async function main() {
   await writeFile(join(root, 'projects.ndjson'), works.map((row) => JSON.stringify(row)).join('\n'), 'utf8');
   await writeFile(join(root, 'attachments.ndjson'), attachments.map((row) => JSON.stringify(row)).join('\n'), 'utf8');
   await writeJson(join(root, 'metrics.json'), metrics);
-  await writeJson(join(root, 'manifest.json'), { sourceUrl: ESAKSHI_DASHBOARD_URL, apiOrigin: ESAKSHI_ORIGIN, fetchedAt: new Date().toISOString(), states: selectedStates, works: works.length, attachments: attachments.length, metrics: metrics.length, errors, mode: withAttachments ? 'reports-and-attachments' : 'reports-only' });
+  await writeJson(join(root, 'manifest.json'), { sourceUrl: ESAKSHI_DASHBOARD_URL, apiOrigin: ESAKSHI_ORIGIN, fetchedAt: new Date().toISOString(), states: selectedStates, works: works.length, attachments: attachments.length, metrics: metrics.length, errors, partitions, mode: withAttachments ? 'reports-and-attachments' : 'reports-only' });
   console.log(JSON.stringify({ sourceUrl: ESAKSHI_DASHBOARD_URL, states: selectedStates.length, works: works.length, attachments: attachments.length, metrics: metrics.length, errors: errors.length, output: root }, null, 2));
 }
 

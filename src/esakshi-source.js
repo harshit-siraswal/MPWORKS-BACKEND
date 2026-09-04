@@ -1,7 +1,11 @@
+import './env.js';
+
 const DEFAULT_ORIGIN = 'https://mplads.mospi.gov.in';
 
 export const ESAKSHI_ORIGIN = process.env.MPLADS_API_ORIGIN || DEFAULT_ORIGIN;
 export const ESAKSHI_DASHBOARD_URL = process.env.MPLADS_SOURCE_URL || `${ESAKSHI_ORIGIN}/digigov/dashboard.html`;
+const minIntervalMs = Math.max(Number(process.env.MPLADS_MIN_INTERVAL_MS || 350), 0);
+let nextRequestAt = 0;
 
 const clean = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
 
@@ -9,6 +13,9 @@ async function post(path, body, timeoutMs = 60_000) {
   let lastError;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
+      const waitMs = Math.max(nextRequestAt - Date.now(), 0);
+      if (waitMs) await new Promise((resolve) => setTimeout(resolve, waitMs));
+      nextRequestAt = Date.now() + minIntervalMs;
       const response = await fetch(`${ESAKSHI_ORIGIN}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json; charset=utf-8', Accept: 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
       if (!response.ok) throw new Error(`eSAKSHI ${path} returned HTTP ${response.status}`);
       const text = await response.text();
@@ -101,10 +108,13 @@ export function normalizeWork(row, sourceKey) {
 export function attachmentIdsFromReferenceRows(rows) {
   const found = [];
   for (const row of rows || []) {
-    const names = Array.isArray(row.FILE_NAME) ? row.FILE_NAME : [row.FILE_NAME];
-    const ids = Array.isArray(row.ATTACH_ID) ? row.ATTACH_ID : [row.ATTACH_ID];
+    if (!row || typeof row !== 'object') continue;
+    const names = Array.isArray(row.FILE_NAME) ? row.FILE_NAME : [row.FILE_NAME, row.fileName, row.filename];
+    const rawIds = row.ATTACH_ID ?? row.attachId ?? row.ATTACHMENT_ID ?? row.attachmentId ?? row.ATTACHMENT_IDS;
+    const ids = Array.isArray(rawIds) ? rawIds : [rawIds];
     ids.filter(Boolean).forEach((id, index) => found.push({ id: String(id), fileName: clean(names[index] || names[0] || '') || null }));
-    if (row.URL && row.URL !== 'N/A') found.push({ url: String(row.URL), fileName: clean(names[0] || '') || null });
+    const url = row.URL ?? row.url;
+    if (url && url !== 'N/A') found.push({ url: String(url), fileName: clean(names[0] || '') || null });
   }
   return [...new Map(found.map((item) => [item.id || item.url, item])).values()];
 }
