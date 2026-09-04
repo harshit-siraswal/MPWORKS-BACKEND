@@ -118,9 +118,18 @@ async function attachmentIdsFor(project, raw) {
 
 function attachmentProxyUrl(projectId, attachmentId) { return `/api/projects/${encodeURIComponent(projectId)}/evidence/attachment/${encodeURIComponent(attachmentId)}`; }
 
+function isContentHash(value) { return /^[0-9a-f]{64}$/i.test(String(value || '')); }
+
+function publicEvidenceUrl(projectId, file) {
+  if (file.r2Url) return file.r2Url;
+  if (file.sourceUrl && /^https?:\/\//i.test(file.sourceUrl)) return file.sourceUrl;
+  if (file.sourceAttachmentId && !isContentHash(file.sourceAttachmentId)) return attachmentProxyUrl(projectId, file.sourceAttachmentId);
+  return null;
+}
+
 function publicEvidenceForProject(evidence, projectId) {
   const result = publicEvidence(evidence);
-  result.files = result.files.map((file) => ({ ...file, url: file.r2Url || (file.sourceAttachmentId ? attachmentProxyUrl(projectId, file.sourceAttachmentId) : file.sourceUrl) }));
+  result.files = result.files.map((file) => ({ ...file, url: publicEvidenceUrl(projectId, file) }));
   result.images = result.files.filter((file) => file.mimeType?.startsWith('image/'));
   result.documents = result.files.filter((file) => file.mimeType === 'application/pdf' || !file.mimeType?.startsWith('image/'));
   return result;
@@ -139,9 +148,15 @@ async function runEvidenceJob(project) {
   const job = { status: 'processing', note: 'Fetching official source files and preparing AI analysis…', files: [], images: [], documents: [], attachmentIds: [], liveSourceWorkId: null, persistence: { r2: 'pending', supabase: 'pending', stored: [], warnings: [] } };
   evidenceJobs.set(project.id, job);
   try {
-    const recovered = await recoverSourceProject(project);
+    // The live catalog stores the normalized work row, which already contains
+    // enough identifiers for getAttachIdsbyFlag. This avoids scanning a whole
+    // state report for every project and is the critical path for completed
+    // works that were not included in the initial attachment crawl.
+    let directRefs = [];
+    try { directRefs = await attachmentIdsFor(project, sourcePayload(project, project.raw || {})); } catch { /* use source recovery below */ }
+    const recovered = directRefs.length ? null : await recoverSourceProject(project);
     const sourceProject = recovered ? { ...project, raw: recovered.raw, attachmentIds: [], attachmentCandidates: project.attachmentCandidates || [] } : project;
-    const sourceRefs = recovered ? await attachmentIdsFor(project, recovered.raw) : (sourceProject.attachmentCandidates?.length ? [] : project.attachmentIds.map((id) => ({ id })));
+    const sourceRefs = directRefs.length ? directRefs : recovered ? await attachmentIdsFor(project, recovered.raw) : (sourceProject.attachmentCandidates?.length ? [] : project.attachmentIds.map((id) => ({ id })));
     sourceProject.attachmentIds = sourceRefs.map((item) => item.id).filter(Boolean);
     const attachmentOrigin = process.env.MPLADS_API_ORIGIN || 'https://mplads.mospi.gov.in';
     let evidence = sourceProject.attachmentCandidates?.length ? await analyzeStoredAttachments(sourceProject.attachmentCandidates) : null;
@@ -156,7 +171,11 @@ async function runEvidenceJob(project) {
     try { comparison = await analyzeEvidenceAgainstProject(project, evidence.files); } catch (error) { comparison = { status: 'error', reason: error.message }; }
     let persistence;
     try { persistence = await persistEvidence(sourceProject, evidence.files, comparison); } catch (error) { persistence = { r2: 'error', supabase: 'error', stored: [], warnings: [error.message] }; }
-    Object.assign(job, { status: 'analyzed', note: 'Source evidence was fetched. Image/PDF bytes were compared with the project metadata; AI findings are triage signals for human review, not a fraud finding.', comparison, riskIndex: riskIndex(project, comparison, evidence.files.length), persistence });
+    // persistEvidence mutates each file with its permanent R2 URL. Rebuild the
+    // public payload after persistence so clients never receive a stale proxy
+    // URL built from a SHA-256 content hash.
+    const persistedFiles = publicEvidenceForProject(evidence, project.id);
+    Object.assign(job, { status: 'analyzed', note: 'Source evidence was fetched. Image/PDF bytes were compared with the project metadata; AI findings are triage signals for human review, not a fraud finding.', ...persistedFiles, comparison, riskIndex: riskIndex(project, comparison, evidence.files.length), persistence });
   } catch (error) {
     Object.assign(job, { status: 'failed', error: error.message, note: 'The official source or storage service was temporarily unavailable. Retry this record; no mock evidence was substituted.' });
   }
@@ -449,7 +468,7 @@ const server = createServer(async (request, response) => {
       const job = evidenceJobPayload(evidenceJobs.get(project.id));
       if (job) return sendJson(response, 200, { data: { projectId: project.id, ...job, items: evidenceItemsForProject(project, job.files.length || job.attachmentIds.length), attachmentCount: job.files.length || job.attachmentIds.length, imageUrls: job.files.map((file) => file.url).filter(Boolean), sourceUrl: project.sourceUrl, fetchTimestamp: project.fetchTimestamp } });
       const files = (project.attachmentCandidates || []).map(({ localPath, ...file }) => ({ ...file, sourceAttachmentId: file.attachmentId || file.sourceAttachmentId || null, status: file.r2Url ? 'stored' : 'discovered' }));
-      const publicFiles = files.map((file) => ({ ...file, url: file.r2Url || (file.sourceAttachmentId ? attachmentProxyUrl(project.id, file.sourceAttachmentId) : file.sourceUrl) }));
+      const publicFiles = files.map((file) => ({ ...file, url: publicEvidenceUrl(project.id, file) }));
       if (!publicFiles.length && !project.attachmentIds.length) void runEvidenceJob(project);
       const queued = evidenceJobPayload(evidenceJobs.get(project.id));
       if (queued) return sendJson(response, 200, { data: { projectId: project.id, ...queued, items: evidenceItemsForProject(project, queued.files.length || queued.attachmentIds.length), attachmentCount: queued.files.length || queued.attachmentIds.length, imageUrls: queued.files.map((file) => file.url).filter(Boolean), sourceUrl: project.sourceUrl, fetchTimestamp: project.fetchTimestamp } });
