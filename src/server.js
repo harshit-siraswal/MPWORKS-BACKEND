@@ -308,13 +308,14 @@ const server = createServer(async (request, response) => {
       const sourceRefs = recovered ? await attachmentIdsFor(project, recovered.raw) : (sourceProject.attachmentCandidates?.length ? [] : project.attachmentIds.map((id) => ({ id })));
       sourceProject.attachmentIds = sourceRefs.map((item) => item.id).filter(Boolean);
       const attachmentOrigin = process.env.MPLADS_API_ORIGIN || 'https://mplads.mospi.gov.in';
-      const evidence = sourceRefs.length
-        ? await fetchAndAnalyzeAttachments(sourceProject.attachmentIds, attachmentOrigin)
-        : sourceProject.attachmentCandidates?.length
-        ? await analyzeStoredAttachments(sourceProject.attachmentCandidates)
-        : sourceProject.imageUrls.length
-        ? await fetchAndAnalyzeImages(sourceProject.imageUrls)
-        : await fetchAndAnalyzeAttachments(sourceProject.attachmentIds, attachmentOrigin);
+      let evidence = sourceProject.attachmentCandidates?.length ? await analyzeStoredAttachments(sourceProject.attachmentCandidates) : null;
+      if (!evidence?.files.length) {
+        evidence = sourceRefs.length
+          ? await fetchAndAnalyzeAttachments(sourceProject.attachmentIds, attachmentOrigin)
+          : sourceProject.imageUrls.length
+          ? await fetchAndAnalyzeImages(sourceProject.imageUrls)
+          : await fetchAndAnalyzeAttachments(sourceProject.attachmentIds, attachmentOrigin);
+      }
       let comparison = { status: 'inconclusive', reason: 'No image or PDF evidence was fetched' };
       let persistence = { r2: 'not-configured', supabase: 'not-configured', stored: [], warnings: [] };
       if (evidence.files.length) {
