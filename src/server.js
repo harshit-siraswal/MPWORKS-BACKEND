@@ -166,7 +166,7 @@ async function appendEvidenceIndex(project, files) {
   const existing = await readFile(path, 'utf8').catch(() => '');
   const existingKeys = new Set(existing.split(/\r?\n/).filter(Boolean).flatMap((line) => { try { const row = JSON.parse(line); return [`${row.sourceWorkId}|${row.term}|${row.houseCode}|${row.attachmentId}`]; } catch { return []; } }));
   const sourceWorkId = project.raw?.sourceWorkId || project.raw?.WORK_RECOMMENDATION_DTL_ID || project.raw?.WORK_ID;
-  const rows = files.map((file) => ({ sourceWorkId: sourceWorkId == null ? null : String(sourceWorkId), term: project.term, houseCode: project.house === 'Rajya Sabha' ? '1' : '2', flag: file.flag || project.raw?.flag || project.raw?.FLAG || 3, attachmentId: file.sourceAttachmentId, officialSourceVerified: true, fileName: file.fileName || null, mimeType: file.mimeType || null, sha256: file.sha256 || null, bytes: file.bytes || null, r2Key: file.r2Key || null, r2Url: file.r2Url || file.url || null, sourceUrl: file.sourceUrl || null, analyzedAt: file.analyzedAt || new Date().toISOString(), analyzer: file.analyzer || 'on-demand-evidence' })).filter((row) => row.sourceWorkId && row.attachmentId && row.r2Url && !existingKeys.has(`${row.sourceWorkId}|${row.term}|${row.houseCode}|${row.attachmentId}`));
+  const rows = files.map((file) => ({ sourceWorkId: sourceWorkId == null ? null : String(sourceWorkId), term: project.term, houseCode: project.house === 'Rajya Sabha' ? '1' : '2', flag: file.flag || project.raw?.flag || project.raw?.FLAG || 3, attachmentId: file.sourceAttachmentId, officialSourceVerified: true, aiVerified: true, fileName: file.fileName || null, mimeType: file.mimeType || null, sha256: file.sha256 || null, bytes: file.bytes || null, r2Key: file.r2Key || null, r2Url: file.r2Url || file.url || null, sourceUrl: file.sourceUrl || null, analyzedAt: file.analyzedAt || new Date().toISOString(), analyzer: file.analyzer || 'on-demand-evidence' })).filter((row) => row.sourceWorkId && row.attachmentId && row.r2Url && !existingKeys.has(`${row.sourceWorkId}|${row.term}|${row.houseCode}|${row.attachmentId}`));
   if (!rows.length) return;
   await mkdir(root, { recursive: true });
   const separator = existing && !existing.endsWith('\n') ? '\n' : '';
@@ -249,8 +249,9 @@ async function runEvidenceJob(project) {
     if (!evidence.files.length) return;
     let comparison = { status: 'queued', reason: 'AI evidence comparison is still running.' };
     try { comparison = await analyzeEvidenceAgainstProject(project, evidence.files); } catch (error) { comparison = { status: 'error', reason: error.message }; }
-    if (comparison.status === 'completed' && comparison.consistency === 'inconsistent') {
-      Object.assign(job, { status: 'rejected', note: 'The fetched file was withheld because its contents conflict with this source project. It was not stored or counted as evidence.', files: [], images: [], documents: [], comparison, riskIndex: riskIndex(project, comparison, 0, feedback), persistence: { r2: 'not-written', supabase: 'not-written', stored: [], warnings: ['Evidence identity mismatch'] } });
+    if (isLiveProject && (comparison.status !== 'completed' || comparison.consistency !== 'consistent')) {
+      const rejected = comparison.status === 'completed';
+      Object.assign(job, { status: rejected ? 'rejected' : 'verification-failed', note: rejected ? 'The fetched file was withheld because its contents conflict with this source project. It was not stored or counted as evidence.' : 'The fetched file was withheld because its identity could not be verified against this source project. It was not stored or counted as evidence; retry after the comparison service is available.', files: [], images: [], documents: [], comparison, riskIndex: riskIndex(project, comparison, 0, feedback), persistence: { r2: 'not-written', supabase: 'not-written', stored: [], warnings: [rejected ? 'Evidence identity mismatch' : 'Evidence identity verification incomplete'] } });
       evidenceJobs.set(project.id, job);
       return;
     }
