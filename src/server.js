@@ -155,7 +155,10 @@ async function runEvidenceJob(project) {
     // round trip to MPLADS for them. This also prevents old hash-only indexes
     // from being mistaken for upstream attachment identifiers.
     if (!project.attachmentCandidates?.length) {
-      try { directRefs = await attachmentIdsFor(project, sourcePayload(project, project.raw || {}), [project.raw?.flag, 1]); } catch { /* use source recovery below */ }
+      // The catalog keeps the first work-list occurrence, while completed
+      // evidence is commonly returned under flag 3. Query both primary and
+      // completion flags so a work like Narendra Modi's is not reported as 0.
+      try { directRefs = await attachmentIdsFor(project, sourcePayload(project, project.raw || {}), [project.raw?.flag, 1, 3]); } catch { /* use the empty result below */ }
     }
     // Live eSAKSHI rows already contain the identifiers needed by
     // getAttachIdsbyFlag. Do not fall back to scanning three full state
