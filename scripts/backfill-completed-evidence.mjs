@@ -7,7 +7,7 @@ import { putR2Object, r2Configured } from '../src/persistence/r2.js';
 
 const DEFAULT_REPORT_TYPE = 'Completed';
 const DEFAULT_MIN_INTERVAL_MS = 1_000;
-const DEFAULT_MAX_BYTES = 8 * 1024 * 1024;
+const DEFAULT_MAX_BYTES = 25 * 1024 * 1024;
 
 export const clean = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
 export const sha256 = (buffer) => createHash('sha256').update(buffer).digest('hex');

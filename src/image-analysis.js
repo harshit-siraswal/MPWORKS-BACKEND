@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import sharp from 'sharp';
 
-const maxBytes = 8 * 1024 * 1024;
+const maxBytes = Number(process.env.MPLADS_MAX_EVIDENCE_BYTES || 25 * 1024 * 1024);
 
 function inferMime(fileName, buffer) {
   const name = String(fileName || '').toLowerCase();
@@ -72,9 +72,9 @@ async function fetchBuffer(url) {
   const response = await fetch(url, { signal: AbortSignal.timeout(15_000), headers: { 'User-Agent': 'MPWorks/0.1 source-evidence-fetcher' } });
   if (!response.ok) throw new Error(`source evidence request failed: ${response.status}`);
   const contentLength = Number(response.headers.get('content-length') || 0);
-  if (contentLength > maxBytes) throw new Error('image exceeds 8 MB safety limit');
+  if (contentLength > maxBytes) throw new Error(`image exceeds ${Math.round(maxBytes / 1024 / 1024)} MB safety limit`);
   const buffer = Buffer.from(await response.arrayBuffer());
-  if (buffer.byteLength > maxBytes) throw new Error('image exceeds 8 MB safety limit');
+  if (buffer.byteLength > maxBytes) throw new Error(`image exceeds ${Math.round(maxBytes / 1024 / 1024)} MB safety limit`);
   return buffer;
 }
 
@@ -131,7 +131,7 @@ export async function fetchAndAnalyzeAttachments(ids = [], origin = 'https://mpl
       visit(payload);
       for (const candidate of candidates) {
         const buffer = Buffer.from(candidate.base64, 'base64');
-        if (buffer.byteLength > maxBytes) { errors.push({ id, error: 'attachment exceeds 8 MB safety limit' }); continue; }
+        if (buffer.byteLength > maxBytes) { errors.push({ id, error: `attachment exceeds ${Math.round(maxBytes / 1024 / 1024)} MB safety limit` }); continue; }
         const inferred = inferMime('', buffer);
         const mimeType = candidate.mimeType && candidate.mimeType !== 'image/unknown' && candidate.mimeType !== 'application/octet-stream' ? candidate.mimeType : inferred.mimeType;
         const sourceUrl = `${origin}/attachment/${id}`;
