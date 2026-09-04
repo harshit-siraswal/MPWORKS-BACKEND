@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { attachmentIdsFromReferenceRows, getAttachment, getAttachmentReferences, getStates, getTenures, getWorkReport, getMetrics as getLiveMetrics } from './esakshi-source.js';
 import { listProjects, getProject, getSummary, getSourceHealth, getFacets, getSourceMetadata, getMetrics, getVillages, getMembers, getMember } from './catalog.js';
@@ -5,12 +6,16 @@ import { analyzeStoredAttachments, fetchAndAnalyzeAttachments, fetchAndAnalyzeIm
 import { analyzeEvidenceAgainstProject } from './evidence-analysis.js';
 import { persistEvidence } from './persistence/evidence.js';
 import { getDistrictAnalysis, startDistrictAnalysis } from './district-analysis.js';
+import { putR2Object, r2Configured } from './persistence/r2.js';
+import { supabaseConfigured, supabaseInsert, supabaseSelect, supabaseUpdate } from './persistence/supabase.js';
 
 const port = Number(process.env.PORT || 8000);
 const geocodeCache = new Map();
 const memberImageCache = new Map();
 const recoveredSourceCache = new Map();
 const evidenceJobs = new Map();
+const feedbackMemory = new Map();
+const feedbackRateLimit = new Map();
 
 function sendJson(response, status, payload) {
   response.writeHead(status, {
@@ -50,7 +55,8 @@ async function findMemberImage(member) {
     const response = await fetch(`https://en.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=${search}&gsrnamespace=0&gsrlimit=3&prop=pageimages|info&piprop=thumbnail&pithumbsize=320&inprop=url&format=json&origin=*`, { signal: AbortSignal.timeout(8_000), headers: { 'User-Agent': 'MPWorks/0.1 public-data-explorer' } });
     if (!response.ok) throw new Error(`profile image search returned ${response.status}`);
     const pages = Object.values((await response.json()).query?.pages || {});
-    const page = pages.find((candidate) => candidate.thumbnail?.source && candidate.title?.toLowerCase().includes(member.name.split(' ')[0].toLowerCase())) || pages.find((candidate) => candidate.thumbnail?.source);
+    const expected = String(member.name || '').toLowerCase().replace(/\b(shri|smt|dr|hon'?ble)\b/g, ' ').split(/[^a-z0-9]+/).filter((token) => token.length > 2);
+    const page = pages.find((candidate) => { const title = String(candidate.title || '').toLowerCase().split(/[^a-z0-9]+/); return candidate.thumbnail?.source && expected.length >= 2 && expected.every((token) => title.includes(token)); });
     const image = page?.thumbnail?.source ? { imageUrl: page.thumbnail.source, imageSourceUrl: page.fullurl || `https://en.wikipedia.org/wiki/${encodeURIComponent(page.title)}`, imageSource: 'Wikimedia Commons/Wikipedia thumbnail' } : null;
     memberImageCache.set(member.id, image);
     return image;
@@ -126,7 +132,7 @@ function evidenceItemsForProject(project, attachmentCount) {
 
 function evidenceJobPayload(job) {
   if (!job) return null;
-  return { status: job.status, note: job.note, files: job.files || [], images: job.images || [], documents: job.documents || [], comparison: job.comparison || { status: 'queued', reason: 'AI evidence comparison is still running.' }, persistence: job.persistence || { r2: 'pending', supabase: 'pending', stored: [], warnings: [] }, attachmentIds: job.attachmentIds || [], liveSourceWorkId: job.liveSourceWorkId || null, error: job.error || null };
+  return { status: job.status, note: job.note, files: job.files || [], images: job.images || [], documents: job.documents || [], comparison: job.comparison || { status: 'queued', reason: 'AI evidence comparison is still running.' }, riskIndex: job.riskIndex || null, persistence: job.persistence || { r2: 'pending', supabase: 'pending', stored: [], warnings: [] }, attachmentIds: job.attachmentIds || [], liveSourceWorkId: job.liveSourceWorkId || null, error: job.error || null };
 }
 
 async function runEvidenceJob(project) {
@@ -143,14 +149,14 @@ async function runEvidenceJob(project) {
       evidence = sourceRefs.length ? await fetchAndAnalyzeAttachments(sourceProject.attachmentIds, attachmentOrigin) : sourceProject.imageUrls.length ? await fetchAndAnalyzeImages(sourceProject.imageUrls) : await fetchAndAnalyzeAttachments(sourceProject.attachmentIds, attachmentOrigin);
     }
     const files = publicEvidenceForProject(evidence, project.id);
-    Object.assign(job, { status: evidence.files.length ? 'analyzing' : 'not-available', note: evidence.files.length ? 'Source files were fetched. AI comparison is running; this page will update automatically.' : sourceProject.attachmentIds.length ? 'The official source returned attachment identifiers, but no readable image or PDF payload was returned.' : 'The live source record does not expose an image or PDF attachment identifier.', ...files, attachmentIds: sourceProject.attachmentIds, liveSourceWorkId: recovered?.sourceId || null });
+    Object.assign(job, { status: evidence.files.length ? 'analyzing' : 'not-available', note: evidence.files.length ? 'Source files were fetched. AI comparison is running; this page will update automatically.' : sourceProject.attachmentIds.length ? 'The official source returned attachment identifiers, but no readable image or PDF payload was returned.' : 'The live source record does not expose an image or PDF attachment identifier.', ...files, riskIndex: riskIndex(project, null, evidence.files.length), attachmentIds: sourceProject.attachmentIds, liveSourceWorkId: recovered?.sourceId || null });
     evidenceJobs.set(project.id, job);
     if (!evidence.files.length) return;
     let comparison = { status: 'queued', reason: 'AI evidence comparison is still running.' };
     try { comparison = await analyzeEvidenceAgainstProject(project, evidence.files); } catch (error) { comparison = { status: 'error', reason: error.message }; }
     let persistence;
     try { persistence = await persistEvidence(sourceProject, evidence.files, comparison); } catch (error) { persistence = { r2: 'error', supabase: 'error', stored: [], warnings: [error.message] }; }
-    Object.assign(job, { status: 'analyzed', note: 'Source evidence was fetched. Image/PDF bytes were compared with the project metadata; AI findings are triage signals for human review, not a fraud finding.', comparison, persistence });
+    Object.assign(job, { status: 'analyzed', note: 'Source evidence was fetched. Image/PDF bytes were compared with the project metadata; AI findings are triage signals for human review, not a fraud finding.', comparison, riskIndex: riskIndex(project, comparison, evidence.files.length), persistence });
   } catch (error) {
     Object.assign(job, { status: 'failed', error: error.message, note: 'The official source or storage service was temporarily unavailable. Retry this record; no mock evidence was substituted.' });
   }
@@ -180,7 +186,7 @@ async function fetchAttachmentBinary(id) {
 
 function publicProject(project) {
   const { raw, normalized, evidenceItems, signals, attachmentCandidates, imageUrls, attachmentIds, ...safeProject } = project;
-  return { ...safeProject, imageCount: imageUrls.length, attachmentCount: attachmentIds.length };
+  return { ...safeProject, imageCount: imageUrls.length, attachmentCount: attachmentIds.length, riskIndex: riskIndex(project) };
 }
 
 function amountFromProject(project, field, normalizedField) {
@@ -196,6 +202,45 @@ function districtMetrics(filters) {
   metrics.usedAmount = scoped.reduce((sum, project) => sum + amountFromProject(project, 'ACTUAL_AMOUNT', 'actualAmount'), 0) || null;
   return metrics;
 }
+
+function riskIndex(project, comparison = null, evidenceCount = project.attachmentCandidates?.length || project.attachmentIds?.length || 0) {
+  const missing = ['state', 'district', 'constituency', 'mp', 'status'].filter((field) => !String(project[field] || '').trim());
+  let score = comparison?.consistency === 'inconsistent' ? 82 : comparison?.consistency === 'consistent' ? 18 : evidenceCount ? 34 : 55;
+  score = Math.max(0, Math.min(100, score + Math.min(missing.length * 4, 16)));
+  const label = score >= 75 ? 'High review priority' : score >= 50 ? 'Elevated review priority' : score >= 30 ? 'Moderate review priority' : 'Lower review priority';
+  const reason = comparison?.consistency === 'inconsistent'
+    ? comparison.summary || comparison.possibleIssues?.join(' ') || 'The AI comparison found fields that need human verification.'
+    : comparison?.consistency === 'consistent'
+      ? comparison.summary || 'Available evidence is broadly consistent with the source record.'
+      : evidenceCount
+        ? 'Evidence is available, but a full AI comparison has not been completed for this record.'
+        : 'No image or PDF evidence is currently available. This is an evidence-coverage limitation, not proof of fraud.';
+  return { score, label, reason, confidence: Number(comparison?.confidence) || (comparison ? 25 : 10), basis: comparison ? 'AI evidence comparison plus source-field checks' : 'Source-field completeness and evidence availability; AI comparison pending' };
+}
+
+function exportRows(filters) {
+  return listProjects(filters).map((project) => {
+    const evidenceLinks = [...(project.imageUrls || []), ...(project.attachmentIds || []).map((id) => attachmentProxyUrl(project.id, id))].filter(Boolean);
+    const risk = riskIndex(project);
+    return { project_id: project.id, work_description: project.title, member_of_parliament: project.mp, house: project.house, term: project.term, state: project.state, district: project.district, constituency: project.constituency, village_or_area: project.villageRaw || project.villageNames?.join(' | '), category: project.category, status: project.status, recommended_amount: project.amount, source_date: project.sourceDate, review_index: `${risk.score}/100`, review_label: risk.label, review_reason: risk.reason, evidence_links: evidenceLinks.join(' | '), official_source: project.sourceUrl };
+  });
+}
+
+const exportHeaders = ['project_id', 'work_description', 'member_of_parliament', 'house', 'term', 'state', 'district', 'constituency', 'village_or_area', 'category', 'status', 'recommended_amount', 'source_date', 'review_index', 'review_label', 'review_reason', 'evidence_links', 'official_source'];
+function exportCell(value) { return `"${String(value ?? '').replace(/"/g, '""')}"`; }
+function csvExport(rows) { return [exportHeaders.join(','), ...rows.map((row) => exportHeaders.map((header) => exportCell(row[header])).join(','))].join('\r\n'); }
+function excelExport(rows) { const headings = exportHeaders.map((header) => `<th>${header.replace(/_/g, ' ')}</th>`).join(''); const body = rows.map((row) => `<tr>${exportHeaders.map((header) => `<td>${String(row[header] ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')}</td>`).join('')}</tr>`).join(''); return `<!doctype html><html><head><meta charset="utf-8"><style>table{border-collapse:collapse}th,td{border:1px solid #ccd6df;padding:5px;vertical-align:top}th{background:#eaf2f7}</style></head><body><table><thead><tr>${headings}</tr></thead><tbody>${body}</tbody></table></body></html>`; }
+function pdfText(value) { return String(value ?? '').replace(/[^\x20-\x7E]/g, '?').replace(/[\\()]/g, (character) => `\\${character}`).slice(0, 230); }
+function pdfExport(rows) { const lines = ['MP Works data export', `Records: ${rows.length}`, 'Review index is a human-review signal, not a fraud probability or finding.', '']; rows.forEach((row, index) => { lines.push(`${index + 1}. ${pdfText(row.work_description)}`); lines.push(`MP: ${pdfText(row.member_of_parliament)} | ${pdfText(row.state)} | ${pdfText(row.district)} | ${pdfText(row.house)}`); lines.push(`Status: ${pdfText(row.status)} | Amount: ${pdfText(row.recommended_amount)} | Review: ${pdfText(row.review_index)} ${pdfText(row.review_label)}`); lines.push(`Evidence: ${pdfText(row.evidence_links || 'none')}`); lines.push(''); }); const pages = []; for (let index = 0; index < lines.length; index += 46) pages.push(lines.slice(index, index + 46)); const objects = []; objects[1] = '<< /Type /Catalog /Pages 2 0 R >>'; objects[3] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>'; const kids = []; pages.forEach((pageLines) => { const pageId = objects.length; objects.push(null); const contentId = objects.length; objects.push(null); kids.push(`${pageId} 0 R`); const commands = ['BT', '/F1 8 Tf', '40 770 Td', ...pageLines.map((line) => `(${pdfText(line)}) Tj 0 -16 Td`), 'ET'].join('\n'); objects[pageId] = `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents ${contentId} 0 R >>`; objects[contentId] = `<< /Length ${Buffer.byteLength(commands, 'latin1')} >>\nstream\n${commands}\nendstream`; }); objects[2] = `<< /Type /Pages /Kids [${kids.join(' ')}] /Count ${kids.length} >>`; let output = '%PDF-1.4\n'; const offsets = [0]; for (let index = 1; index < objects.length; index += 1) { offsets[index] = Buffer.byteLength(output, 'latin1'); output += `${index} 0 obj\n${objects[index]}\nendobj\n`; } const xrefOffset = Buffer.byteLength(output, 'latin1'); output += `xref\n0 ${objects.length}\n0000000000 65535 f \n${offsets.slice(1).map((offset) => `${String(offset).padStart(10, '0')} 00000 n `).join('\n')}\ntrailer\n<< /Size ${objects.length} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`; return Buffer.from(output, 'latin1'); }
+
+function feedbackIpHash(request) { const forwarded = String(request.headers['x-forwarded-for'] || '').split(',')[0].trim(); const ip = forwarded || String(request.headers['x-real-ip'] || request.socket.remoteAddress || 'unknown').trim(); const salt = process.env.FEEDBACK_IP_SALT || process.env.SUPABASE_URL || 'mpworks-feedback'; return createHash('sha256').update(`${salt}|${ip}`).digest('hex'); }
+function feedbackKey(projectKey, ipHash, kind) { return `${projectKey}|${ipHash}|${kind}`; }
+async function feedbackRows(projectKey) { if (supabaseConfigured()) { try { return await supabaseSelect('project_public_feedback', `select=id,kind,ip_hash,comment,rating,r2_url,mime_type,created_at,updated_at,undone_at&project_key=eq.${encodeURIComponent(projectKey)}&order=created_at.desc&limit=200`); } catch { /* fall back for a deployment awaiting its migration */ } } return [...feedbackMemory.values()].filter((row) => row.project_key === projectKey); }
+function feedbackSummary(projectKey, rows, ipHash) { const active = rows.filter((row) => !row.undone_at); const ratings = active.map((row) => Number(row.rating)).filter((rating) => Number.isInteger(rating)); return { projectId: projectKey, ratingCount: ratings.length, averageRating: ratings.length ? Math.round((ratings.reduce((sum, rating) => sum + rating, 0) / ratings.length) * 10) / 10 : null, photoCount: active.filter((row) => row.kind === 'photo').length, commentCount: active.filter((row) => row.kind === 'comment' && row.comment).length, photos: active.filter((row) => row.kind === 'photo' && row.r2_url).slice(0, 20).map((row) => ({ url: row.r2_url, createdAt: row.created_at })), comments: active.filter((row) => row.kind === 'comment' && row.comment).slice(0, 20).map((row) => ({ comment: row.comment, createdAt: row.created_at })), viewer: { photo: Boolean(rows.find((row) => row.kind === 'photo' && row.ip_hash === ipHash)), comment: Boolean(rows.find((row) => row.kind === 'comment' && row.ip_hash === ipHash)), rating: Boolean(rows.find((row) => row.kind === 'rating' && row.ip_hash === ipHash)) } }; }
+function checkFeedbackRateLimit(ipHash) { const now = Date.now(); const current = feedbackRateLimit.get(ipHash) || { startedAt: now, count: 0 }; if (now - current.startedAt > 60_000) { current.startedAt = now; current.count = 0; } current.count += 1; feedbackRateLimit.set(ipHash, current); return current.count <= 30; }
+function decodeFeedbackImage(value) { const match = typeof value === 'string' && value.match(/^data:(image\/(?:jpeg|png|webp));base64,([a-z0-9+/=\s]+)$/i); if (!match) return null; const buffer = Buffer.from(match[2].replace(/\s/g, ''), 'base64'); if (!buffer.length || buffer.length > 6 * 1024 * 1024) return null; const signature = buffer.subarray(0, 12).toString('hex'); const valid = (match[1] === 'image/jpeg' && signature.startsWith('ffd8ff')) || (match[1] === 'image/png' && signature.startsWith('89504e470d0a1a0a')) || (match[1] === 'image/webp' && buffer.subarray(0, 4).toString() === 'RIFF' && buffer.subarray(8, 12).toString() === 'WEBP'); return valid ? { buffer, mimeType: match[1], extension: match[1].split('/')[1].replace('jpeg', 'jpg') } : null; }
+async function insertFeedback(projectKey, ipHash, kind, fields) { const row = { project_key: projectKey, kind, ip_hash: ipHash, ...fields }; if (supabaseConfigured()) { try { return (await supabaseInsert('project_public_feedback', row))[0] || row; } catch { /* keep public feedback usable while a migration or database connection is recovering */ } } const key = feedbackKey(projectKey, ipHash, kind); if (feedbackMemory.has(key)) throw new Error('already_submitted'); feedbackMemory.set(key, { ...row, id: key, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), undone_at: null }); return feedbackMemory.get(key); }
+async function undoFeedback(projectKey, ipHash, kind) { const rows = await feedbackRows(projectKey); const existing = rows.find((row) => row.kind === kind && row.ip_hash === ipHash); if (!existing) return false; if (supabaseConfigured() && existing.id) { try { await supabaseUpdate('project_public_feedback', `id=eq.${encodeURIComponent(existing.id)}`, { undone_at: new Date().toISOString(), updated_at: new Date().toISOString() }); return true; } catch { /* fall back to the process-local record */ } } const key = feedbackKey(projectKey, ipHash, kind); const row = feedbackMemory.get(key); if (row) { row.undone_at = new Date().toISOString(); row.updated_at = row.undone_at; } return true; }
 
 async function geocodeDistrict(district, state) {
   const key = `${district}|${state}`;
@@ -252,6 +297,16 @@ const server = createServer(async (request, response) => {
     const filters = filtersFrom(url);
     const scoped = listProjects(filters);
     return sendJson(response, 200, { data: { recommended: scoped.length, completed: scoped.filter((project) => /completed|partially completed/i.test(project.status)).length, total: scoped.length, filters }, provenance: getSourceMetadata() });
+  }
+  const exportMatch = url.pathname.match(/^\/api\/exports\/(csv|excel|xls|pdf)$/i);
+  if (request.method === 'GET' && exportMatch) {
+    const format = exportMatch[1].toLowerCase();
+    const rows = exportRows(filtersFrom(url));
+    const body = format === 'pdf' ? pdfExport(rows) : Buffer.from(format === 'csv' ? csvExport(rows) : excelExport(rows), 'utf8');
+    const contentType = format === 'pdf' ? 'application/pdf' : format === 'csv' ? 'text/csv; charset=utf-8' : 'application/vnd.ms-excel; charset=utf-8';
+    const extension = format === 'pdf' ? 'pdf' : format === 'csv' ? 'csv' : 'xls';
+    response.writeHead(200, { 'Content-Type': contentType, 'Content-Length': body.length, 'Content-Disposition': `attachment; filename="mpworks-export-${new Date().toISOString().slice(0, 10)}.${extension}"`, 'Access-Control-Allow-Origin': '*' });
+    return response.end(body);
   }
   if (request.method === 'GET' && url.pathname === '/api/mps') {
     const members = getMembers(filtersFrom(url));
@@ -354,6 +409,38 @@ const server = createServer(async (request, response) => {
     } catch (error) { return sendJson(response, 502, { error: 'attachment_fetch_failed', detail: error.message }); }
   }
 
+  const feedbackMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/feedback$/);
+  if (feedbackMatch && (request.method === 'GET' || request.method === 'POST')) {
+    const projectKey = decodeURIComponent(feedbackMatch[1]);
+    if (!getProject(projectKey)) return sendJson(response, 404, { error: 'project_not_found' });
+    const ipHash = feedbackIpHash(request);
+    if (request.method === 'GET') return sendJson(response, 200, { data: feedbackSummary(projectKey, await feedbackRows(projectKey), ipHash) });
+    if (Number(request.headers['content-length'] || 0) > 9 * 1024 * 1024) return sendJson(response, 413, { error: 'feedback_payload_too_large', note: 'Images must be 6 MB or smaller.' });
+    if (!checkFeedbackRateLimit(ipHash)) return sendJson(response, 429, { error: 'feedback_rate_limited', note: 'Please wait before sending more feedback.' });
+    const body = await readBody(request);
+    const rows = await feedbackRows(projectKey);
+    if (body.action === 'undo') {
+      if (!['photo', 'comment', 'rating'].includes(body.kind)) return sendJson(response, 400, { error: 'invalid_feedback_kind' });
+      if (!await undoFeedback(projectKey, ipHash, body.kind)) return sendJson(response, 404, { error: 'feedback_not_found' });
+      return sendJson(response, 200, { data: feedbackSummary(projectKey, await feedbackRows(projectKey), ipHash), message: `${body.kind} feedback was undone for this IP.` });
+    }
+    const requested = [];
+    if (body.comment !== undefined) { const comment = String(body.comment || '').trim(); if (!comment || comment.length > 2000) return sendJson(response, 400, { error: 'invalid_comment', note: 'Comments must be between 1 and 2,000 characters.' }); requested.push({ kind: 'comment', fields: { comment } }); }
+    if (body.rating !== undefined) { const rating = Number(body.rating); if (!Number.isInteger(rating) || rating < 0 || rating > 10) return sendJson(response, 400, { error: 'invalid_rating', note: 'Rating must be a whole number from 0 to 10.' }); requested.push({ kind: 'rating', fields: { rating } }); }
+    if (body.imageData !== undefined) { if (!r2Configured()) return sendJson(response, 503, { error: 'photo_storage_unavailable', note: 'Photo storage is temporarily unavailable. Comments and ratings remain available.' }); const image = decodeFeedbackImage(body.imageData); if (!image) return sendJson(response, 400, { error: 'invalid_image', note: 'Upload a valid JPEG, PNG or WebP image up to 6 MB.' }); requested.push({ kind: 'photo', image }); }
+    if (!requested.length) return sendJson(response, 400, { error: 'feedback_required', note: 'Send a comment, rating, or photo.' });
+    const duplicates = requested.filter((item) => rows.some((row) => row.kind === item.kind && row.ip_hash === ipHash));
+    if (duplicates.length) return sendJson(response, 409, { error: 'feedback_already_submitted', kinds: duplicates.map((item) => item.kind), note: 'Each IP can submit one photo, one comment and one rating per project. Only undo is available.' });
+    for (const item of requested) {
+      if (item.kind === 'photo') {
+        const key = `mplads/public-feedback/${String(projectKey).replace(/[^a-z0-9_-]+/gi, '-').slice(0, 100)}/${item.image.extension}-${createHash('sha256').update(item.image.buffer).digest('hex')}.${item.image.extension}`;
+        const stored = await putR2Object(key, item.image.buffer, item.image.mimeType);
+        await insertFeedback(projectKey, ipHash, 'photo', { r2_key: stored.key, r2_url: stored.url, mime_type: item.image.mimeType, file_size: item.image.buffer.length });
+      } else await insertFeedback(projectKey, ipHash, item.kind, item.fields);
+    }
+    return sendJson(response, 201, { data: feedbackSummary(projectKey, await feedbackRows(projectKey), ipHash), message: 'Feedback received.' });
+  }
+
   const projectMatch = url.pathname.match(/^\/api\/projects\/([^/]+)(?:\/(evidence|reports))?$/);
   if (projectMatch && request.method === 'GET') {
     const project = getProject(projectMatch[1]);
@@ -367,7 +454,7 @@ const server = createServer(async (request, response) => {
       const queued = evidenceJobPayload(evidenceJobs.get(project.id));
       if (queued) return sendJson(response, 200, { data: { projectId: project.id, ...queued, items: evidenceItemsForProject(project, queued.files.length || queued.attachmentIds.length), attachmentCount: queued.files.length || queued.attachmentIds.length, imageUrls: queued.files.map((file) => file.url).filter(Boolean), sourceUrl: project.sourceUrl, fetchTimestamp: project.fetchTimestamp } });
       const sourceRefs = project.attachmentIds.map((id) => ({ id }));
-      return sendJson(response, 200, { data: { projectId: project.id, status: publicFiles.length ? 'available' : 'not-available', liveSourceWorkId: null, attachmentIds: sourceRefs.map((item) => item.id).filter(Boolean), items: evidenceItemsForProject(project, publicFiles.length || sourceRefs.length), signals: project.signals, files: publicFiles, images: publicFiles.filter((file) => file.mimeType?.startsWith('image/')), documents: publicFiles.filter((file) => file.mimeType === 'application/pdf'), imageUrls: publicFiles.map((file) => file.url).filter(Boolean), attachmentCount: publicFiles.length || sourceRefs.length, sourceUrl: project.sourceUrl, fetchTimestamp: project.fetchTimestamp } });
+      return sendJson(response, 200, { data: { projectId: project.id, status: publicFiles.length ? 'available' : 'not-available', liveSourceWorkId: null, attachmentIds: sourceRefs.map((item) => item.id).filter(Boolean), items: evidenceItemsForProject(project, publicFiles.length || sourceRefs.length), signals: project.signals, riskIndex: riskIndex(project, null, publicFiles.length || sourceRefs.length), files: publicFiles, images: publicFiles.filter((file) => file.mimeType?.startsWith('image/')), documents: publicFiles.filter((file) => file.mimeType === 'application/pdf'), imageUrls: publicFiles.map((file) => file.url).filter(Boolean), attachmentCount: publicFiles.length || sourceRefs.length, sourceUrl: project.sourceUrl, fetchTimestamp: project.fetchTimestamp } });
     }
     return sendJson(response, 200, { data: project });
   }
