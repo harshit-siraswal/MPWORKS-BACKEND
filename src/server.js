@@ -6,6 +6,7 @@ import { attachmentIdsFromReferenceRows, getAttachment, getAttachmentReferences,
 import { listProjects, getProject, getSummary, getSourceHealth, getFacets, getSourceMetadata, getMetrics, getVillages, getMembers, getMember } from './catalog.js';
 import { analyzeStoredAttachments, fetchAndAnalyzeAttachments, fetchAndAnalyzeImages } from './image-analysis.js';
 import { analyzeEvidenceAgainstProject } from './evidence-analysis.js';
+import exifr from 'exifr';
 import { persistEvidence } from './persistence/evidence.js';
 import { getDistrictAnalysis, startDistrictAnalysis } from './district-analysis.js';
 import { putR2Object, r2Configured } from './persistence/r2.js';
@@ -251,6 +252,24 @@ async function fetchAttachmentBinary(id) {
   return null;
 }
 
+async function findPhotoGps(project) {
+  const candidates = (project.attachmentCandidates || []).filter((file) => /image\//i.test(file.mimeType || '') && (file.r2Url || file.url)).slice(0, 4);
+  for (const candidate of candidates) {
+    try {
+      const url = candidate.r2Url || candidate.url;
+      const response = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+      if (!response.ok) continue;
+      const buffer = Buffer.from(await response.arrayBuffer());
+      if (buffer.length > 25 * 1024 * 1024) continue;
+      const gps = await exifr.gps(buffer);
+      const lat = Number(gps?.latitude);
+      const lon = Number(gps?.longitude);
+      if (Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) return { coordinates: { lat, lon }, sourceAttachmentId: candidate.sourceAttachmentId || candidate.attachmentId || null, source: 'image-exif-gps' };
+    } catch { /* some evidence files do not contain EXIF GPS metadata */ }
+  }
+  return null;
+}
+
 function publicProject(project, feedback = null) {
   const { raw, normalized, evidenceItems, signals, attachmentCandidates, imageUrls, attachmentIds, ...safeProject } = project;
   const sourceMayHaveEvidence = Boolean(raw?.FILE_STATUS || raw?.fileStatus) || /completed|partially completed|physical inspection/i.test(project.status || '');
@@ -486,9 +505,17 @@ const server = createServer(async (request, response) => {
     const project = getProject(refreshMatch[1]);
     if (!project) return sendJson(response, 404, { error: 'project_not_found' });
     const current = evidenceJobs.get(project.id);
-    if (current?.status === 'processing' || current?.status === 'analyzing') return sendJson(response, 202, { data: { projectId: project.id, ...evidenceJobPayload(current) } });
+    if (current && ['processing', 'fetching', 'analyzing'].includes(current.status)) return sendJson(response, 202, { data: { projectId: project.id, ...evidenceJobPayload(current) } });
     void runEvidenceJob(project);
     return sendJson(response, 202, { data: { projectId: project.id, status: 'processing', note: 'Evidence fetching and AI analysis has started. This page will update automatically.', files: [], images: [], documents: [], comparison: { status: 'queued', reason: 'Evidence analysis is running.' }, persistence: { r2: 'pending', supabase: 'pending', stored: [], warnings: [] } } });
+  }
+
+  const locationMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/evidence\/location$/);
+  if (locationMatch && request.method === 'GET') {
+    const project = getProject(decodeURIComponent(locationMatch[1]));
+    if (!project) return sendJson(response, 404, { error: 'project_not_found' });
+    const location = await findPhotoGps(project);
+    return sendJson(response, 200, { data: location || { coordinates: null, message: 'The available evidence images do not contain readable GPS coordinates.' } });
   }
 
   const attachmentMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/evidence\/attachment\/([^/]+)$/);

@@ -49,6 +49,7 @@ The government host can be intermittent; the collector retries each API request 
 - `GET /api/projects/:id/evidence`
 - `POST /api/projects/:id/evidence/refresh` resolves the live eSAKSHI work ID, fetches official JPEG/PNG/PDF attachments, analyzes images, and stores them in R2 when configured
 - `GET /api/projects/:id/evidence/attachment/:attachmentId` provides a bounded source proxy for attachments that have not yet been copied to R2
+- `GET /api/projects/:id/evidence/location` checks stored evidence image EXIF metadata for GPS coordinates when available
 - `POST /api/projects/:id/reports`
 - `GET /api/map/locations` returns explicitly labelled district approximations from OpenStreetMap Nominatim
 - `GET /api/catalog/summary`
