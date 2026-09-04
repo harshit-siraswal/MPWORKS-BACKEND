@@ -108,11 +108,9 @@ async function recoverSourceProject(project) {
 }
 
 async function attachmentIdsFor(project, raw) {
-  const refs = [];
   const flags = [...new Set([raw?.FLAG, 1, 2, 3].map(Number).filter(Number.isFinite))];
-  for (const flag of flags) {
-    try { refs.push(...attachmentIdsFromReferenceRows(await getAttachmentReferences(raw, flag))); } catch { /* try the next official flag */ }
-  }
+  const responses = await Promise.allSettled(flags.map((flag) => getAttachmentReferences(raw, flag)));
+  const refs = responses.flatMap((result) => result.status === 'fulfilled' ? attachmentIdsFromReferenceRows(result.value) : []);
   return [...new Map([...refs, ...attachmentIdsFromReferenceRows([raw])].filter((item) => item.id).map((item) => [item.id, item])).values()];
 }
 
@@ -163,6 +161,10 @@ async function runEvidenceJob(project) {
     const sourceProject = recovered ? { ...project, raw: recovered.raw, attachmentIds: [], attachmentCandidates: project.attachmentCandidates || [] } : project;
     const sourceRefs = directRefs.length ? directRefs : recovered ? await attachmentIdsFor(project, recovered.raw) : (sourceProject.attachmentCandidates?.length ? [] : project.attachmentIds.map((id) => ({ id })));
     sourceProject.attachmentIds = sourceRefs.map((item) => item.id).filter(Boolean);
+    if (sourceProject.attachmentIds.length) {
+      Object.assign(job, { status: 'analyzing', note: `Found ${sourceProject.attachmentIds.length} official attachment identifiers. Downloading source files…`, attachmentIds: sourceProject.attachmentIds, liveSourceWorkId: recovered?.sourceId || null });
+      evidenceJobs.set(project.id, job);
+    }
     const attachmentOrigin = process.env.MPLADS_API_ORIGIN || 'https://mplads.mospi.gov.in';
     let evidence = sourceProject.attachmentCandidates?.length ? await analyzeStoredAttachments(sourceProject.attachmentCandidates) : null;
     if (!evidence?.files.length) {
