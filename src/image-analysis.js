@@ -94,10 +94,10 @@ export async function analyzeStoredAttachments(candidates = []) {
   const errors = [];
   for (const candidate of candidates.slice(0, 4)) {
     try {
-      if (!candidate.localPath) continue;
-      const buffer = await readFile(candidate.localPath);
+      const buffer = candidate.localPath ? await readFile(candidate.localPath) : candidate.r2Url ? await fetchBuffer(candidate.r2Url) : null;
+      if (!buffer) continue;
       const mimeType = candidate.mimeType || inferMime(candidate.fileName, buffer).mimeType;
-      const sourceUrl = candidate.sourceUrl || `${candidate.attachmentId ? 'https://mplads.mospi.gov.in/attachment' : 'local-evidence'}/${candidate.attachmentId || ''}`;
+      const sourceUrl = candidate.sourceUrl || candidate.r2Url || `${candidate.attachmentId ? 'https://mplads.mospi.gov.in/attachment' : 'local-evidence'}/${candidate.attachmentId || ''}`;
       const base = mimeType.startsWith('image/') ? await analyzeImage(buffer, sourceUrl) : inspectDocument(buffer, sourceUrl, mimeType, candidate.fileName, candidate.attachmentId);
       files.push({ buffer, sourceAttachmentId: String(candidate.attachmentId || candidate.sourceAttachmentId || ''), fileName: candidate.fileName || null, ...base, persisted: false });
     } catch (error) { errors.push({ localPath: candidate.localPath, error: error.message }); }

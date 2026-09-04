@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { listProjects, getProject, getSummary, getSourceHealth, getFacets, getSourceMetadata, getMetrics, getVillages } from './catalog.js';
+import { listProjects, getProject, getSummary, getSourceHealth, getFacets, getSourceMetadata, getMetrics, getVillages, getMembers, getMember } from './catalog.js';
 import { getMetrics as getLiveMetrics } from './esakshi-source.js';
 import { analyzeStoredAttachments, fetchAndAnalyzeAttachments, fetchAndAnalyzeImages } from './image-analysis.js';
 import { analyzeEvidenceAgainstProject } from './evidence-analysis.js';
@@ -8,6 +8,7 @@ import { getDistrictAnalysis, startDistrictAnalysis } from './district-analysis.
 
 const port = Number(process.env.PORT || 8000);
 const geocodeCache = new Map();
+const memberImageCache = new Map();
 
 function sendJson(response, status, payload) {
   response.writeHead(status, {
@@ -28,6 +29,7 @@ async function readBody(request) {
 function filtersFrom(url) {
   return {
     query: url.searchParams.get('query'),
+    mp: url.searchParams.get('mp'),
     house: url.searchParams.get('house'),
     term: url.searchParams.get('term'),
     memberType: url.searchParams.get('memberType'),
@@ -37,6 +39,20 @@ function filtersFrom(url) {
     category: url.searchParams.get('category'),
     status: url.searchParams.get('status')
   };
+}
+
+async function findMemberImage(member) {
+  if (memberImageCache.has(member.id)) return memberImageCache.get(member.id);
+  try {
+    const search = encodeURIComponent(`${member.name} Indian parliament ${member.state}`);
+    const response = await fetch(`https://en.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=${search}&gsrnamespace=0&gsrlimit=3&prop=pageimages|info&piprop=thumbnail&pithumbsize=320&inprop=url&format=json&origin=*`, { signal: AbortSignal.timeout(8_000), headers: { 'User-Agent': 'MPWorks/0.1 public-data-explorer' } });
+    if (!response.ok) throw new Error(`profile image search returned ${response.status}`);
+    const pages = Object.values((await response.json()).query?.pages || {});
+    const page = pages.find((candidate) => candidate.thumbnail?.source && candidate.title?.toLowerCase().includes(member.name.split(' ')[0].toLowerCase())) || pages.find((candidate) => candidate.thumbnail?.source);
+    const image = page?.thumbnail?.source ? { imageUrl: page.thumbnail.source, imageSourceUrl: page.fullurl || `https://en.wikipedia.org/wiki/${encodeURIComponent(page.title)}`, imageSource: 'Wikimedia Commons/Wikipedia thumbnail' } : null;
+    memberImageCache.set(member.id, image);
+    return image;
+  } catch { memberImageCache.set(member.id, null); return null; }
 }
 
 function publicEvidence(evidence) {
@@ -103,6 +119,44 @@ const server = createServer(async (request, response) => {
     if (!combo || !/^\d+(,\d+){3,4}$/.test(combo)) return sendJson(response, 400, { error: 'combo_required', note: 'Use the official eSAKSHI state,constituency,mp,house[,tenure] codes.' });
     try { return sendJson(response, 200, { data: await getLiveMetrics(combo), provenance: { source: getSourceMetadata().officialDashboard, api: getSourceMetadata().officialApi } }); }
     catch (error) { return sendJson(response, 502, { error: 'live_metrics_unavailable', detail: error.message }); }
+  }
+  if (request.method === 'GET' && (url.pathname === '/api/works/recommended' || url.pathname === '/api/works/completed')) {
+    const kind = url.pathname.endsWith('completed') ? 'completed' : 'recommended';
+    const filters = filtersFrom(url);
+    const filtered = listProjects(filters).filter((project) => kind === 'completed' ? /completed|partially completed/i.test(project.status) : true);
+    const requestedLimit = Number(url.searchParams.get('limit') || 50);
+    const requestedOffset = Number(url.searchParams.get('offset') || 0);
+    const limit = Number.isFinite(requestedLimit) ? Math.min(Math.max(Math.floor(requestedLimit), 1), 200) : 50;
+    const offset = Number.isFinite(requestedOffset) ? Math.max(Math.floor(requestedOffset), 0) : 0;
+    return sendJson(response, 200, { data: filtered.slice(offset, offset + limit).map(publicProject), meta: { count: Math.min(limit, Math.max(filtered.length - offset, 0)), total: filtered.length, limit, offset, hasMore: offset + limit < filtered.length, queryVersion: `works-${kind}-v0.1` }, provenance: getSourceMetadata() });
+  }
+  if (request.method === 'GET' && url.pathname === '/api/works/summary') {
+    const filters = filtersFrom(url);
+    const scoped = listProjects(filters);
+    return sendJson(response, 200, { data: { recommended: scoped.length, completed: scoped.filter((project) => /completed|partially completed/i.test(project.status)).length, total: scoped.length, filters }, provenance: getSourceMetadata() });
+  }
+  if (request.method === 'GET' && url.pathname === '/api/mps') {
+    const members = getMembers(filtersFrom(url));
+    const requestedLimit = Math.min(Math.max(Number(url.searchParams.get('limit') || 24), 1), 60);
+    const offset = Math.max(Number(url.searchParams.get('offset') || 0), 0);
+    const page = members.slice(offset, offset + requestedLimit);
+    const enriched = await Promise.all(page.map(async (member) => ({ ...member, ...(await findMemberImage(member) || {}) })));
+    return sendJson(response, 200, { data: enriched, meta: { count: enriched.length, total: members.length, limit: requestedLimit, offset, hasMore: offset + enriched.length < members.length }, provenance: { imageSource: 'Wikimedia Commons/Wikipedia thumbnails when a matching public source is found' } });
+  }
+  const memberProjectsMatch = url.pathname.match(/^\/api\/mps\/([^/]+)\/projects$/);
+  if (request.method === 'GET' && memberProjectsMatch) {
+    const member = getMember(memberProjectsMatch[1], filtersFrom(url));
+    if (!member) return sendJson(response, 404, { error: 'member_not_found' });
+    const projects = listProjects(filtersFrom(url)).filter((project) => member.projectIds?.includes(project.id));
+    const offset = Math.max(Number(url.searchParams.get('offset') || 0), 0);
+    const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 50), 1), 200);
+    return sendJson(response, 200, { data: projects.slice(offset, offset + limit).map(publicProject), meta: { count: Math.min(limit, Math.max(projects.length - offset, 0)), total: projects.length, limit, offset, hasMore: offset + limit < projects.length }, member });
+  }
+  const memberMatch = url.pathname.match(/^\/api\/mps\/([^/]+)$/);
+  if (request.method === 'GET' && memberMatch) {
+    const member = getMember(memberMatch[1], filtersFrom(url));
+    if (!member) return sendJson(response, 404, { error: 'member_not_found' });
+    return sendJson(response, 200, { data: { ...member, ...(await findMemberImage(member) || {}) }, provenance: getSourceMetadata() });
   }
   if (request.method === 'GET' && url.pathname === '/api/source-health') return sendJson(response, 200, { data: getSourceHealth() });
   if (request.method === 'GET' && url.pathname === '/api/methodology') return sendJson(response, 200, { data: { riskLanguage: 'Risk indicators prioritize human review and are not conclusions.', methods: ['source-record-retention', 'optional-image-metadata-and-similarity'], caveats: ['Image coverage is source-dependent.', 'Coordinates are never silently invented. The map uses an explicitly labelled district approximation only.', 'No risk score is calculated until sufficient evidence is available.'], source: getSourceMetadata() } });
@@ -173,7 +227,10 @@ const server = createServer(async (request, response) => {
   if (projectMatch && request.method === 'GET') {
     const project = getProject(projectMatch[1]);
     if (!project) return sendJson(response, 404, { error: 'project_not_found' });
-    if (projectMatch[2] === 'evidence') return sendJson(response, 200, { data: { projectId: project.id, items: project.evidenceItems, signals: project.signals, imageUrls: project.imageUrls, attachmentCount: project.attachmentIds.length, sourceUrl: project.sourceUrl, fetchTimestamp: project.fetchTimestamp } });
+    if (projectMatch[2] === 'evidence') {
+      const files = (project.attachmentCandidates || []).map(({ localPath, ...file }) => ({ ...file, sourceAttachmentId: file.attachmentId || file.sourceAttachmentId || null, status: file.r2Url ? 'stored' : 'discovered' }));
+      return sendJson(response, 200, { data: { projectId: project.id, items: project.evidenceItems, signals: project.signals, files, images: files.filter((file) => file.mimeType?.startsWith('image/')), documents: files.filter((file) => file.mimeType === 'application/pdf'), imageUrls: files.map((file) => file.r2Url).filter(Boolean), attachmentCount: files.length || project.attachmentIds.length, sourceUrl: project.sourceUrl, fetchTimestamp: project.fetchTimestamp } });
+    }
     return sendJson(response, 200, { data: project });
   }
 
