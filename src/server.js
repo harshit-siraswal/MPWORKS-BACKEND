@@ -157,7 +157,11 @@ async function runEvidenceJob(project) {
     if (!project.attachmentCandidates?.length) {
       try { directRefs = await attachmentIdsFor(project, sourcePayload(project, project.raw || {}), [project.raw?.flag, 1]); } catch { /* use source recovery below */ }
     }
-    const recovered = directRefs.length ? null : await recoverSourceProject(project);
+    // Live eSAKSHI rows already contain the identifiers needed by
+    // getAttachIdsbyFlag. Do not fall back to scanning three full state
+    // reports when that direct lookup is empty or temporarily unavailable;
+    // that fallback was the source of long-running jobs and gateway 503s.
+    const recovered = directRefs.length || project.source === 'MPLADS live eSAKSHI ingest' ? null : await recoverSourceProject(project);
     const sourceProject = recovered ? { ...project, raw: recovered.raw, attachmentIds: [], attachmentCandidates: project.attachmentCandidates || [] } : project;
     const sourceRefs = directRefs.length ? directRefs : recovered ? await attachmentIdsFor(project, recovered.raw) : (sourceProject.attachmentCandidates?.length ? [] : project.attachmentIds.map((id) => ({ id })));
     sourceProject.attachmentIds = sourceRefs.map((item) => item.id).filter(Boolean);
