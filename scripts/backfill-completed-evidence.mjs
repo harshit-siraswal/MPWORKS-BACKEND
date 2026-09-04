@@ -78,7 +78,11 @@ function decodeBase64(value) {
   }
 }
 
-const PAYLOAD_FIELDS = ['URL', 'url', 'CONTENT', 'content', 'DATA', 'data', 'FILE_DATA', 'fileData', 'DOCUMENT', 'document'];
+const PAYLOAD_FIELDS = [
+  'URL', 'url', 'CONTENT', 'content', 'DATA', 'data', 'FILE_DATA', 'fileData',
+  'FILE_CONTENT', 'fileContent', 'BASE64', 'base64', 'DOCUMENT', 'document',
+  'ATTACHMENT', 'attachment',
+];
 
 export function decodePayload(row) {
   if (!row || typeof row !== 'object') return null;
@@ -283,8 +287,8 @@ function serializableProgressEvent(workKey, current) {
 }
 
 function flagsForWork(work, raws, requestedFlags) {
-  const values = requestedFlags.length ? requestedFlags : raws.flatMap((raw) => [raw.FLAG, work.flag, 1, 2, 3]);
-  return [...new Set(values.map(Number).filter(Number.isFinite))];
+  const values = requestedFlags.length ? requestedFlags : raws.flatMap((raw) => [raw.FLAG, work.flag, 3, 1, 2]);
+  return [...new Set(values.map(Number).filter((value) => Number.isInteger(value) && value >= 1 && value <= 3))];
 }
 
 async function main() {
