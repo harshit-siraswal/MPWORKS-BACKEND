@@ -44,7 +44,8 @@ function filtersFrom(url) {
     district: url.searchParams.get('district'),
     constituency: url.searchParams.get('constituency'),
     category: url.searchParams.get('category'),
-    status: url.searchParams.get('status')
+    status: url.searchParams.get('status'),
+    sort: url.searchParams.get('sort')
   };
 }
 
@@ -108,7 +109,7 @@ async function recoverSourceProject(project) {
 }
 
 async function attachmentIdsFor(project, raw, requestedFlags = null) {
-  const flags = [...new Set((requestedFlags || [raw?.FLAG, 1, 2, 3]).map(Number).filter(Number.isFinite))];
+  const flags = [...new Set((requestedFlags || [raw?.FLAG, 1, 2, 3]).map(Number).filter((flag) => Number.isInteger(flag) && flag >= 1 && flag <= 3))];
   const responses = await Promise.allSettled(flags.map((flag) => getAttachmentReferences(raw, flag)));
   const refs = responses.flatMap((result) => result.status === 'fulfilled' ? attachmentIdsFromReferenceRows(result.value) : []);
   return [...new Map([...refs, ...attachmentIdsFromReferenceRows([raw])].filter((item) => item.id).map((item) => [item.id, item])).values()];
@@ -178,7 +179,11 @@ async function runEvidenceJob(project) {
       evidence = sourceRefs.length ? await fetchAndAnalyzeAttachments(sourceProject.attachmentIds, attachmentOrigin) : sourceProject.imageUrls.length ? await fetchAndAnalyzeImages(sourceProject.imageUrls) : await fetchAndAnalyzeAttachments(sourceProject.attachmentIds, attachmentOrigin);
     }
     const files = publicEvidenceForProject(evidence, project.id);
-    Object.assign(job, { status: evidence.files.length ? 'analyzing' : 'not-available', note: evidence.files.length ? 'Source files were fetched. AI comparison is running; this page will update automatically.' : sourceProject.attachmentIds.length ? 'The official source returned attachment identifiers, but no readable image or PDF payload was returned.' : 'The live source record does not expose an image or PDF attachment identifier.', ...files, riskIndex: riskIndex(project, null, evidence.files.length), attachmentIds: sourceProject.attachmentIds, liveSourceWorkId: recovered?.sourceId || null });
+    const missingAttachmentNote = project.source === 'MPLADS live eSAKSHI ingest'
+      ? 'The live eSAKSHI record does not expose an image or PDF attachment identifier.'
+      : 'This older work-list snapshot has no attachment identifier. The official live eSAKSHI record could not be matched to this row.';
+    const feedback = feedbackSummary(project.id, await feedbackRows(project.id), null);
+    Object.assign(job, { status: evidence.files.length ? 'analyzing' : 'not-available', note: evidence.files.length ? 'Source files were fetched. AI comparison is running; this page will update automatically.' : sourceProject.attachmentIds.length ? 'The official source returned attachment identifiers, but no readable image or PDF payload was returned.' : missingAttachmentNote, ...files, riskIndex: riskIndex(project, null, evidence.files.length, feedback), attachmentIds: sourceProject.attachmentIds, liveSourceWorkId: recovered?.sourceId || null });
     evidenceJobs.set(project.id, job);
     if (!evidence.files.length) return;
     let comparison = { status: 'queued', reason: 'AI evidence comparison is still running.' };
@@ -197,7 +202,7 @@ async function runEvidenceJob(project) {
       project.attachmentIds = [...new Set(persistedFiles.files.map((file) => file.sourceAttachmentId).filter(Boolean))];
       project.imageUrls = persistedFiles.images.map((file) => file.url).filter(Boolean);
     }
-    Object.assign(job, { status: 'analyzed', note: 'Source evidence was fetched. Image/PDF bytes were compared with the project metadata; AI findings are triage signals for human review, not a fraud finding.', ...persistedFiles, comparison, riskIndex: riskIndex(project, comparison, evidence.files.length), persistence });
+    Object.assign(job, { status: 'analyzed', note: 'Source evidence was fetched. Image/PDF bytes were compared with the project metadata; AI findings are triage signals for human review, not a fraud finding.', ...persistedFiles, comparison, riskIndex: riskIndex(project, comparison, evidence.files.length, feedback), persistence });
   } catch (error) {
     Object.assign(job, { status: 'failed', error: error.message, note: 'The official source or storage service was temporarily unavailable. Retry this record; no mock evidence was substituted.' });
   }
@@ -215,7 +220,7 @@ function decodeAttachmentValue(value) {
 
 async function fetchAttachmentBinary(id) {
   const rows = await getAttachment(id);
-  for (const row of rows) for (const key of ['URL', 'url', 'CONTENT', 'content', 'DATA', 'data', 'FILE_DATA', 'fileData', 'DOCUMENT']) {
+  for (const row of rows) for (const key of ['URL', 'url', 'CONTENT', 'content', 'DATA', 'data', 'FILE_DATA', 'fileData', 'FILE_CONTENT', 'fileContent', 'BASE64', 'base64', 'DOCUMENT', 'document', 'ATTACHMENT', 'attachment']) {
     const buffer = decodeAttachmentValue(row?.[key]);
     if (!buffer) continue;
     const fileName = row.FILE_NAME || row.fileName || 'evidence';
@@ -225,9 +230,10 @@ async function fetchAttachmentBinary(id) {
   return null;
 }
 
-function publicProject(project) {
+function publicProject(project, feedback = null) {
   const { raw, normalized, evidenceItems, signals, attachmentCandidates, imageUrls, attachmentIds, ...safeProject } = project;
-  return { ...safeProject, imageCount: imageUrls.length, attachmentCount: attachmentIds.length, riskIndex: riskIndex(project) };
+  const sourceMayHaveEvidence = Boolean(raw?.FILE_STATUS || raw?.fileStatus) || /completed|partially completed|physical inspection/i.test(project.status || '');
+  return { ...safeProject, imageCount: imageUrls.length, attachmentCount: attachmentIds.length, evidenceStatus: attachmentIds.length ? 'indexed' : sourceMayHaveEvidence ? 'source-pending-index' : 'not-reported-by-source', publicFeedback: feedback || { ratingCount: 0, averageRating: null, photoCount: 0, commentCount: 0 }, riskIndex: riskIndex(project, null, undefined, feedback) };
 }
 
 function amountFromProject(project, field, normalizedField) {
@@ -244,9 +250,11 @@ function districtMetrics(filters) {
   return metrics;
 }
 
-function riskIndex(project, comparison = null, evidenceCount = project.attachmentCandidates?.length || project.attachmentIds?.length || 0) {
+function riskIndex(project, comparison = null, evidenceCount = project.attachmentCandidates?.length || project.attachmentIds?.length || 0, feedback = null) {
   const missing = ['state', 'district', 'constituency', 'mp', 'status'].filter((field) => !String(project[field] || '').trim());
   let score = comparison?.consistency === 'inconsistent' ? 82 : comparison?.consistency === 'consistent' ? 18 : evidenceCount ? 34 : 55;
+  if (feedback?.averageRating != null) score += Math.round((5 - Number(feedback.averageRating)) * 2);
+  score += Math.min(Number(feedback?.commentCount || 0) + Number(feedback?.photoCount || 0), 3);
   score = Math.max(0, Math.min(100, score + Math.min(missing.length * 4, 16)));
   const label = score >= 75 ? 'High review priority' : score >= 50 ? 'Elevated review priority' : score >= 30 ? 'Moderate review priority' : 'Lower review priority';
   const reason = comparison?.consistency === 'inconsistent'
@@ -256,7 +264,9 @@ function riskIndex(project, comparison = null, evidenceCount = project.attachmen
       : evidenceCount
         ? 'Evidence is available, but a full AI comparison has not been completed for this record.'
         : 'No image or PDF evidence is currently available. This is an evidence-coverage limitation, not proof of fraud.';
-  return { score, label, reason, confidence: Number(comparison?.confidence) || (comparison ? 25 : 10), basis: comparison ? 'AI evidence comparison plus source-field checks' : 'Source-field completeness and evidence availability; AI comparison pending' };
+  const contributionCount = Number(feedback?.commentCount || 0) + Number(feedback?.photoCount || 0);
+  const feedbackReason = feedback?.ratingCount ? ` Public feedback averages ${feedback.averageRating}/10 across ${feedback.ratingCount} rating${feedback.ratingCount === 1 ? '' : 's'} and includes ${contributionCount} field contribution${contributionCount === 1 ? '' : 's'}.` : '';
+  return { score, label, reason: `${reason}${feedbackReason}`, confidence: Number(comparison?.confidence) || (comparison ? 25 : 10), basis: `${comparison ? 'AI evidence comparison plus source-field checks' : 'Source-field completeness and evidence availability; AI comparison pending'}${feedback?.ratingCount ? ' plus public feedback' : ''}` };
 }
 
 function exportRows(filters) {
@@ -278,6 +288,9 @@ function feedbackIpHash(request) { const forwarded = String(request.headers['x-f
 function feedbackKey(projectKey, ipHash, kind) { return `${projectKey}|${ipHash}|${kind}`; }
 async function feedbackRows(projectKey) { if (supabaseConfigured()) { try { return await supabaseSelect('project_public_feedback', `select=id,kind,ip_hash,comment,rating,r2_url,mime_type,created_at,updated_at,undone_at&project_key=eq.${encodeURIComponent(projectKey)}&order=created_at.desc&limit=200`); } catch { /* fall back for a deployment awaiting its migration */ } } return [...feedbackMemory.values()].filter((row) => row.project_key === projectKey); }
 function feedbackSummary(projectKey, rows, ipHash) { const active = rows.filter((row) => !row.undone_at); const ratings = active.map((row) => Number(row.rating)).filter((rating) => Number.isInteger(rating)); return { projectId: projectKey, ratingCount: ratings.length, averageRating: ratings.length ? Math.round((ratings.reduce((sum, rating) => sum + rating, 0) / ratings.length) * 10) / 10 : null, photoCount: active.filter((row) => row.kind === 'photo').length, commentCount: active.filter((row) => row.kind === 'comment' && row.comment).length, photos: active.filter((row) => row.kind === 'photo' && row.r2_url).slice(0, 20).map((row) => ({ url: row.r2_url, createdAt: row.created_at })), comments: active.filter((row) => row.kind === 'comment' && row.comment).slice(0, 20).map((row) => ({ comment: row.comment, createdAt: row.created_at })), viewer: { photo: Boolean(rows.find((row) => row.kind === 'photo' && row.ip_hash === ipHash)), comment: Boolean(rows.find((row) => row.kind === 'comment' && row.ip_hash === ipHash)), rating: Boolean(rows.find((row) => row.kind === 'rating' && row.ip_hash === ipHash)) } }; }
+async function allFeedbackRows() { if (supabaseConfigured()) { try { return await supabaseSelect('project_public_feedback', 'select=project_key,kind,rating,undone_at&limit=10000'); } catch { /* feedback migration may still be pending */ } } return [...feedbackMemory.values()]; }
+async function feedbackAggregates(projects) { const wanted = new Set(projects.map((project) => project.id)); const rows = (await allFeedbackRows()).filter((row) => wanted.has(row.project_key)); const groups = new Map(); for (const row of rows) { if (row.undone_at) continue; const current = groups.get(row.project_key) || { ratingCount: 0, ratingTotal: 0, photoCount: 0, commentCount: 0 }; if (row.kind === 'rating' && Number.isInteger(Number(row.rating))) { current.ratingCount += 1; current.ratingTotal += Number(row.rating); } if (row.kind === 'photo') current.photoCount += 1; if (row.kind === 'comment') current.commentCount += 1; groups.set(row.project_key, current); } return new Map([...groups].map(([key, value]) => [key, { ...value, averageRating: value.ratingCount ? Math.round((value.ratingTotal / value.ratingCount) * 10) / 10 : null }])); }
+async function publicProjects(projects, sort = '') { const aggregates = await feedbackAggregates(projects); const rows = projects.map((project) => publicProject(project, aggregates.get(project.id))); const direction = String(sort || '').toLowerCase(); if (direction === 'risk-desc' || direction === 'fraud-desc') rows.sort((a, b) => Number(b.riskIndex?.score || 0) - Number(a.riskIndex?.score || 0)); if (direction === 'risk-asc' || direction === 'fraud-asc') rows.sort((a, b) => Number(a.riskIndex?.score || 0) - Number(b.riskIndex?.score || 0)); if (direction === 'evidence-desc') rows.sort((a, b) => Number(b.attachmentCount || 0) - Number(a.attachmentCount || 0)); return rows; }
 function checkFeedbackRateLimit(ipHash) { const now = Date.now(); const current = feedbackRateLimit.get(ipHash) || { startedAt: now, count: 0 }; if (now - current.startedAt > 60_000) { current.startedAt = now; current.count = 0; } current.count += 1; feedbackRateLimit.set(ipHash, current); return current.count <= 30; }
 function decodeFeedbackImage(value) { const match = typeof value === 'string' && value.match(/^data:(image\/(?:jpeg|png|webp));base64,([a-z0-9+/=\s]+)$/i); if (!match) return null; const buffer = Buffer.from(match[2].replace(/\s/g, ''), 'base64'); if (!buffer.length || buffer.length > 6 * 1024 * 1024) return null; const signature = buffer.subarray(0, 12).toString('hex'); const valid = (match[1] === 'image/jpeg' && signature.startsWith('ffd8ff')) || (match[1] === 'image/png' && signature.startsWith('89504e470d0a1a0a')) || (match[1] === 'image/webp' && buffer.subarray(0, 4).toString() === 'RIFF' && buffer.subarray(8, 12).toString() === 'WEBP'); return valid ? { buffer, mimeType: match[1], extension: match[1].split('/')[1].replace('jpeg', 'jpg') } : null; }
 async function insertFeedback(projectKey, ipHash, kind, fields) { const row = { project_key: projectKey, kind, ip_hash: ipHash, ...fields }; if (supabaseConfigured()) { try { return (await supabaseInsert('project_public_feedback', row))[0] || row; } catch { /* keep public feedback usable while a migration or database connection is recovering */ } } const key = feedbackKey(projectKey, ipHash, kind); if (feedbackMemory.has(key)) throw new Error('already_submitted'); feedbackMemory.set(key, { ...row, id: key, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), undone_at: null }); return feedbackMemory.get(key); }
@@ -332,7 +345,8 @@ const server = createServer(async (request, response) => {
     const requestedOffset = Number(url.searchParams.get('offset') || 0);
     const limit = Number.isFinite(requestedLimit) ? Math.min(Math.max(Math.floor(requestedLimit), 1), 200) : 50;
     const offset = Number.isFinite(requestedOffset) ? Math.max(Math.floor(requestedOffset), 0) : 0;
-    return sendJson(response, 200, { data: filtered.slice(offset, offset + limit).map(publicProject), meta: { count: Math.min(limit, Math.max(filtered.length - offset, 0)), total: filtered.length, limit, offset, hasMore: offset + limit < filtered.length, queryVersion: `works-${kind}-v0.1` }, provenance: getSourceMetadata() });
+    const page = filtered.slice(offset, offset + limit);
+    return sendJson(response, 200, { data: await publicProjects(page, filters.sort), meta: { count: Math.min(limit, Math.max(filtered.length - offset, 0)), total: filtered.length, limit, offset, hasMore: offset + limit < filtered.length, queryVersion: `works-${kind}-v0.1` }, provenance: getSourceMetadata() });
   }
   if (request.method === 'GET' && url.pathname === '/api/works/summary') {
     const filters = filtersFrom(url);
@@ -359,12 +373,14 @@ const server = createServer(async (request, response) => {
   }
   const memberProjectsMatch = url.pathname.match(/^\/api\/mps\/([^/]+)\/projects$/);
   if (request.method === 'GET' && memberProjectsMatch) {
-    const member = getMember(memberProjectsMatch[1], filtersFrom(url));
+    const filters = filtersFrom(url);
+    const member = getMember(memberProjectsMatch[1], filters);
     if (!member) return sendJson(response, 404, { error: 'member_not_found' });
-    const projects = listProjects(filtersFrom(url)).filter((project) => member.projectIds?.includes(project.id));
+    const projects = listProjects(filters).filter((project) => member.projectIds?.includes(project.id));
     const offset = Math.max(Number(url.searchParams.get('offset') || 0), 0);
     const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 50), 1), 200);
-    return sendJson(response, 200, { data: projects.slice(offset, offset + limit).map(publicProject), meta: { count: Math.min(limit, Math.max(projects.length - offset, 0)), total: projects.length, limit, offset, hasMore: offset + limit < projects.length }, member });
+    const page = projects.slice(offset, offset + limit);
+    return sendJson(response, 200, { data: await publicProjects(page, filters.sort), meta: { count: Math.min(limit, Math.max(projects.length - offset, 0)), total: projects.length, limit, offset, hasMore: offset + limit < projects.length }, member });
   }
   const memberMatch = url.pathname.match(/^\/api\/mps\/([^/]+)$/);
   if (request.method === 'GET' && memberMatch) {
@@ -376,12 +392,14 @@ const server = createServer(async (request, response) => {
   if (request.method === 'GET' && url.pathname === '/api/methodology') return sendJson(response, 200, { data: { riskLanguage: 'Risk indicators prioritize human review and are not conclusions.', methods: ['source-record-retention', 'optional-image-metadata-and-similarity'], caveats: ['Image coverage is source-dependent.', 'Coordinates are never silently invented. The map uses an explicitly labelled district approximation only.', 'No risk score is calculated until sufficient evidence is available.'], source: getSourceMetadata() } });
 
   if (request.method === 'GET' && url.pathname === '/api/projects') {
-    const filtered = listProjects(filtersFrom(url));
+    const filters = filtersFrom(url);
+    const filtered = listProjects(filters);
     const requestedLimit = Number(url.searchParams.get('limit') || 50);
     const requestedOffset = Number(url.searchParams.get('offset') || 0);
     const limit = Number.isFinite(requestedLimit) ? Math.min(Math.max(Math.floor(requestedLimit), 1), 200) : 50;
     const offset = Number.isFinite(requestedOffset) ? Math.max(Math.floor(requestedOffset), 0) : 0;
-    const projects = filtered.slice(offset, offset + limit).map(publicProject);
+    const page = filtered.slice(offset, offset + limit);
+    const projects = await publicProjects(page, filters.sort);
     return sendJson(response, 200, { data: projects, meta: { count: projects.length, total: filtered.length, limit, offset, hasMore: offset + projects.length < filtered.length, queryVersion: 'catalog-search-v0.2', sourceUpdatedAt: getSourceHealth().sourceFileUpdatedAt } });
   }
 
@@ -487,6 +505,7 @@ const server = createServer(async (request, response) => {
     const project = getProject(projectMatch[1]);
     if (!project) return sendJson(response, 404, { error: 'project_not_found' });
     if (projectMatch[2] === 'evidence') {
+      const feedback = feedbackSummary(project.id, await feedbackRows(project.id), null);
       const job = evidenceJobPayload(evidenceJobs.get(project.id));
       if (job) return sendJson(response, 200, { data: { projectId: project.id, ...job, items: evidenceItemsForProject(project, job.files.length || job.attachmentIds.length), attachmentCount: job.files.length || job.attachmentIds.length, imageUrls: job.files.map((file) => file.url).filter(Boolean), sourceUrl: project.sourceUrl, fetchTimestamp: project.fetchTimestamp } });
       const files = (project.attachmentCandidates || []).map(({ localPath, ...file }) => ({ ...file, sourceAttachmentId: file.attachmentId || file.sourceAttachmentId || null, status: file.r2Url ? 'stored' : 'discovered' }));
@@ -495,9 +514,10 @@ const server = createServer(async (request, response) => {
       const queued = evidenceJobPayload(evidenceJobs.get(project.id));
       if (queued) return sendJson(response, 200, { data: { projectId: project.id, ...queued, items: evidenceItemsForProject(project, queued.files.length || queued.attachmentIds.length), attachmentCount: queued.files.length || queued.attachmentIds.length, imageUrls: queued.files.map((file) => file.url).filter(Boolean), sourceUrl: project.sourceUrl, fetchTimestamp: project.fetchTimestamp } });
       const sourceRefs = project.attachmentIds.map((id) => ({ id }));
-      return sendJson(response, 200, { data: { projectId: project.id, status: publicFiles.length ? 'available' : 'not-available', liveSourceWorkId: null, attachmentIds: sourceRefs.map((item) => item.id).filter(Boolean), items: evidenceItemsForProject(project, publicFiles.length || sourceRefs.length), signals: project.signals, riskIndex: riskIndex(project, null, publicFiles.length || sourceRefs.length), files: publicFiles, images: publicFiles.filter((file) => file.mimeType?.startsWith('image/')), documents: publicFiles.filter((file) => file.mimeType === 'application/pdf'), imageUrls: publicFiles.map((file) => file.url).filter(Boolean), attachmentCount: publicFiles.length || sourceRefs.length, sourceUrl: project.sourceUrl, fetchTimestamp: project.fetchTimestamp } });
+      return sendJson(response, 200, { data: { projectId: project.id, status: publicFiles.length ? 'available' : 'not-available', liveSourceWorkId: null, attachmentIds: sourceRefs.map((item) => item.id).filter(Boolean), items: evidenceItemsForProject(project, publicFiles.length || sourceRefs.length), signals: project.signals, riskIndex: riskIndex(project, null, publicFiles.length || sourceRefs.length, feedback), publicFeedback: feedback, files: publicFiles, images: publicFiles.filter((file) => file.mimeType?.startsWith('image/')), documents: publicFiles.filter((file) => file.mimeType === 'application/pdf'), imageUrls: publicFiles.map((file) => file.url).filter(Boolean), attachmentCount: publicFiles.length || sourceRefs.length, sourceUrl: project.sourceUrl, fetchTimestamp: project.fetchTimestamp } });
     }
-    return sendJson(response, 200, { data: project });
+    const feedback = feedbackSummary(project.id, await feedbackRows(project.id), null);
+    return sendJson(response, 200, { data: { ...project, riskIndex: riskIndex(project, null, undefined, feedback), publicFeedback: feedback } });
   }
 
   if (projectMatch && request.method === 'POST' && projectMatch[2] === 'reports') {
