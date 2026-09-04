@@ -22,6 +22,10 @@ const comparisonCache = new Map();
 const feedbackMemory = new Map();
 const feedbackRateLimit = new Map();
 const INR = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 });
+// The official attachment endpoint currently returns this known cross-record
+// association for work 105146. Keep it quarantined until MPLADS corrects the
+// upstream response; it must never be presented as Mumbai project evidence.
+const quarantinedLiveEvidence = new Set(['105146|1845259.1915050']);
 
 function sendJson(response, status, payload) {
   response.writeHead(status, {
@@ -92,6 +96,12 @@ function sourcePayload(project, row) {
   return { ...row, WORK_CATEGORY: row.WORK_CATEGORY || row.workCategory || project.category, ACTIVITY_NAME: row.ACTIVITY_NAME || row.activityName || project.title, WORK_DESCRIPTION: row.WORK_DESCRIPTION || row.description || project.title, IDA_NAME: row.IDA_NAME || row.implementingAuthority || project.district, CONSTITUENCY_ID: row.CONSTITUENCY_ID || row.constituencyId || null, LETTER_NO: row.LETTER_NO || row.letterNo || null, ACTUAL_AMOUNT: row.ACTUAL_AMOUNT ?? row.actualAmount ?? null, ACTUAL_END_DATE: row.ACTUAL_END_DATE || row.actualEndDate || null, WORK_ID: row.WORK_ID || row.sourceWorkIdPhysical || sourceWorkIdCandidates(project)[0], WORK_RECOMMENDATION_DTL_ID: row.WORK_RECOMMENDATION_DTL_ID || sourceWorkIdCandidates(project)[0], HOUSE_OF_PARLIAMENT: row.HOUSE_OF_PARLIAMENT || (project.house === 'Rajya Sabha' ? '1' : '2'), TENURE: row.TENURE || project.term, STATE_NAME: row.STATE_NAME || project.state, MP_NAME: row.MP_NAME || project.mp, CONSTITUENCY: row.CONSTITUENCY || project.constituency, FLAG: row.FLAG ?? row.flag ?? null, FILE_STATUS: row.FILE_STATUS ?? row.fileStatus ?? true };
 }
 
+function isQuarantinedLiveEvidence(project, attachmentId) {
+  if (project?.source !== 'MPLADS live eSAKSHI ingest') return false;
+  const workId = project.raw?.sourceWorkId || project.raw?.WORK_RECOMMENDATION_DTL_ID || project.raw?.WORK_ID;
+  return quarantinedLiveEvidence.has(`${String(workId || '')}|${String(attachmentId || '')}`);
+}
+
 async function recoverSourceProject(project) {
   const sourceId = sourceWorkIdCandidates(project)[0];
   if (!sourceId) return null;
@@ -114,11 +124,20 @@ async function recoverSourceProject(project) {
   return null;
 }
 
-async function attachmentIdsFor(project, raw, requestedFlags = null) {
+async function attachmentLookupFor(raw, requestedFlags = null) {
   const flags = [...new Set((requestedFlags || [raw?.FLAG, 1, 2, 3]).map(Number).filter((flag) => Number.isInteger(flag) && flag >= 1 && flag <= 3))];
   const responses = await Promise.allSettled(flags.map((flag) => getAttachmentReferences(raw, flag)));
   const refs = responses.flatMap((result) => result.status === 'fulfilled' ? attachmentIdsFromReferenceRows(result.value) : []);
-  return [...new Map([...refs, ...attachmentIdsFromReferenceRows([raw])].filter((item) => item.id).map((item) => [item.id, item])).values()];
+  const fallbackRefs = attachmentIdsFromReferenceRows([raw]);
+  return {
+    refs: [...new Map([...refs, ...fallbackRefs].filter((item) => item.id).map((item) => [item.id, item])).values()],
+    complete: responses.length > 0 && responses.every((result) => result.status === 'fulfilled'),
+    errors: responses.filter((result) => result.status === 'rejected').map((result) => result.reason?.message || 'attachment lookup failed')
+  };
+}
+
+async function attachmentIdsFor(project, raw, requestedFlags = null) {
+  return (await attachmentLookupFor(raw, requestedFlags)).refs;
 }
 
 function attachmentProxyUrl(projectId, attachmentId) { return `/api/projects/${encodeURIComponent(projectId)}/evidence/attachment/${encodeURIComponent(attachmentId)}`; }
@@ -147,7 +166,7 @@ async function appendEvidenceIndex(project, files) {
   const existing = await readFile(path, 'utf8').catch(() => '');
   const existingKeys = new Set(existing.split(/\r?\n/).filter(Boolean).flatMap((line) => { try { const row = JSON.parse(line); return [`${row.sourceWorkId}|${row.term}|${row.houseCode}|${row.attachmentId}`]; } catch { return []; } }));
   const sourceWorkId = project.raw?.sourceWorkId || project.raw?.WORK_RECOMMENDATION_DTL_ID || project.raw?.WORK_ID;
-  const rows = files.map((file) => ({ sourceWorkId: sourceWorkId == null ? null : String(sourceWorkId), term: project.term, houseCode: project.house === 'Rajya Sabha' ? '1' : '2', flag: file.flag || project.raw?.flag || project.raw?.FLAG || 3, attachmentId: file.sourceAttachmentId, fileName: file.fileName || null, mimeType: file.mimeType || null, sha256: file.sha256 || null, bytes: file.bytes || null, r2Key: file.r2Key || null, r2Url: file.r2Url || file.url || null, sourceUrl: file.sourceUrl || null, analyzedAt: file.analyzedAt || new Date().toISOString(), analyzer: file.analyzer || 'on-demand-evidence' })).filter((row) => row.sourceWorkId && row.attachmentId && row.r2Url && !existingKeys.has(`${row.sourceWorkId}|${row.term}|${row.houseCode}|${row.attachmentId}`));
+  const rows = files.map((file) => ({ sourceWorkId: sourceWorkId == null ? null : String(sourceWorkId), term: project.term, houseCode: project.house === 'Rajya Sabha' ? '1' : '2', flag: file.flag || project.raw?.flag || project.raw?.FLAG || 3, attachmentId: file.sourceAttachmentId, officialSourceVerified: true, fileName: file.fileName || null, mimeType: file.mimeType || null, sha256: file.sha256 || null, bytes: file.bytes || null, r2Key: file.r2Key || null, r2Url: file.r2Url || file.url || null, sourceUrl: file.sourceUrl || null, analyzedAt: file.analyzedAt || new Date().toISOString(), analyzer: file.analyzer || 'on-demand-evidence' })).filter((row) => row.sourceWorkId && row.attachmentId && row.r2Url && !existingKeys.has(`${row.sourceWorkId}|${row.term}|${row.houseCode}|${row.attachmentId}`));
   if (!rows.length) return;
   await mkdir(root, { recursive: true });
   const separator = existing && !existing.endsWith('\n') ? '\n' : '';
@@ -174,14 +193,18 @@ async function runEvidenceJob(project) {
     // state report for every project and is the critical path for completed
     // works that were not included in the initial attachment crawl.
     let directRefs = [];
-    // Already-indexed R2 files are authoritative; do not make an unnecessary
-    // round trip to MPLADS for them. This also prevents old hash-only indexes
-    // from being mistaken for upstream attachment identifiers.
-    if (!project.attachmentCandidates?.length) {
-      // The catalog keeps the first work-list occurrence, while completed
-      // evidence is commonly returned under flag 3. Query both primary and
-      // completion flags so a work like Narendra Modi's is not reported as 0.
-      try { directRefs = await attachmentIdsFor(project, sourcePayload(project, project.raw || {}), [project.raw?.flag, 1, 3]); } catch { /* use the empty result below */ }
+    let directLookup = null;
+    let verifiedCandidates = project.attachmentCandidates || [];
+    const isLiveProject = project.source === 'MPLADS live eSAKSHI ingest';
+    // A cached attachment is not authoritative for a live project. The source
+    // work ID can be reused by a bad historical crawl, so every on-demand
+    // analysis must first confirm the attachment ID against the current
+    // eSAKSHI attachment lookup for this exact work.
+    if (isLiveProject || !project.attachmentCandidates?.length) {
+      try {
+        directLookup = await attachmentLookupFor(sourcePayload(project, project.raw || {}), [project.raw?.flag, 1, 2, 3]);
+        directRefs = directLookup.refs.filter((item) => !isQuarantinedLiveEvidence(project, item.id));
+      } catch { /* use the empty result below */ }
     }
     // Some live catalog generations retained the recommendation id but not
     // the physical WORK_ID used by getAttachIdsbyFlag. When the direct lookup
@@ -190,8 +213,20 @@ async function runEvidenceJob(project) {
     // runs on an empty result, keeping the normal path fast while fixing the
     // completed-work evidence gap.
     const recovered = directRefs.length ? null : await recoverSourceProject(project);
-    const sourceProject = recovered ? { ...project, raw: recovered.raw, attachmentIds: [], attachmentCandidates: project.attachmentCandidates || [] } : project;
-    const sourceRefs = directRefs.length ? directRefs : recovered ? await attachmentIdsFor(project, recovered.raw) : (sourceProject.attachmentCandidates?.length ? [] : project.attachmentIds.map((id) => ({ id })));
+    let recoveredLookup = null;
+    if (recovered && (isLiveProject || !directRefs.length)) {
+      recoveredLookup = await attachmentLookupFor(recovered.raw, [recovered.raw?.FLAG, 1, 2, 3]);
+      if (recoveredLookup.refs.length) directRefs = recoveredLookup.refs.filter((item) => !isQuarantinedLiveEvidence(project, item.id));
+    }
+    const liveLookup = recoveredLookup || directLookup;
+    if (isLiveProject) {
+      const officialIds = new Set(directRefs.map((item) => String(item.id)));
+      verifiedCandidates = liveLookup?.complete
+        ? (project.attachmentCandidates || []).filter((file) => officialIds.has(String(file.sourceAttachmentId || file.attachmentId)) && !isQuarantinedLiveEvidence(project, file.sourceAttachmentId || file.attachmentId))
+        : [];
+    }
+    const sourceProject = recovered ? { ...project, raw: recovered.raw, attachmentIds: [], attachmentCandidates: verifiedCandidates } : { ...project, attachmentCandidates: verifiedCandidates };
+    const sourceRefs = directRefs.length ? directRefs : recovered ? [] : (isLiveProject ? [] : (sourceProject.attachmentCandidates?.length ? [] : project.attachmentIds.map((id) => ({ id }))));
     sourceProject.attachmentIds = sourceRefs.map((item) => item.id).filter(Boolean);
     if (sourceProject.attachmentIds.length) {
       Object.assign(job, { status: 'fetching', note: `Found ${sourceProject.attachmentIds.length} official attachment identifiers. Downloading source files…`, attachmentIds: sourceProject.attachmentIds, liveSourceWorkId: recovered?.sourceId || null });
@@ -204,14 +239,21 @@ async function runEvidenceJob(project) {
     }
     const files = publicEvidenceForProject(evidence, project.id);
     const missingAttachmentNote = project.source === 'MPLADS live eSAKSHI ingest'
-      ? 'The live eSAKSHI record does not expose an image or PDF attachment identifier.'
+      ? (liveLookup && !liveLookup.complete
+        ? 'The official MPLADS attachment lookup was temporarily unavailable. The record was not served from an unverified cached association.'
+        : 'The official MPLADS attachment lookup returned no attachment for this source work. Any older unverified association was withheld.')
       : 'This older work-list snapshot has no attachment identifier. The official live eSAKSHI record could not be matched to this row.';
     const feedback = feedbackSummary(project.id, await feedbackRows(project.id), null);
-    Object.assign(job, { status: evidence.files.length ? 'analyzing' : 'not-available', note: evidence.files.length ? `Fetched ${evidence.files.length} source file${evidence.files.length === 1 ? '' : 's'}. AI comparison is running; this page will update automatically.` : sourceProject.attachmentIds.length ? 'The official source returned attachment identifiers, but no readable image or PDF payload was returned.' : missingAttachmentNote, ...files, riskIndex: riskIndex(project, null, evidence.files.length, feedback), attachmentIds: sourceProject.attachmentIds, liveSourceWorkId: recovered?.sourceId || null });
+    Object.assign(job, { status: evidence.files.length ? 'analyzing' : 'not-available', note: evidence.files.length ? `Fetched ${evidence.files.length} source file${evidence.files.length === 1 ? '' : 's'}. Verifying the file against this source project before displaying or storing it.` : sourceProject.attachmentIds.length ? 'The official source returned attachment identifiers, but no readable image or PDF payload was returned.' : missingAttachmentNote, ...files, files: [], images: [], documents: [], riskIndex: riskIndex(project, null, evidence.files.length, feedback), attachmentIds: sourceProject.attachmentIds, liveSourceWorkId: recovered?.sourceId || null });
     evidenceJobs.set(project.id, job);
     if (!evidence.files.length) return;
     let comparison = { status: 'queued', reason: 'AI evidence comparison is still running.' };
     try { comparison = await analyzeEvidenceAgainstProject(project, evidence.files); } catch (error) { comparison = { status: 'error', reason: error.message }; }
+    if (comparison.status === 'completed' && comparison.consistency === 'inconsistent') {
+      Object.assign(job, { status: 'rejected', note: 'The fetched file was withheld because its contents conflict with this source project. It was not stored or counted as evidence.', files: [], images: [], documents: [], comparison, riskIndex: riskIndex(project, comparison, 0, feedback), persistence: { r2: 'not-written', supabase: 'not-written', stored: [], warnings: ['Evidence identity mismatch'] } });
+      evidenceJobs.set(project.id, job);
+      return;
+    }
     let persistence;
     try { persistence = await persistEvidence(sourceProject, evidence.files, comparison); } catch (error) { persistence = { r2: 'error', supabase: 'error', stored: [], warnings: [error.message] }; }
     // persistEvidence mutates each file with its permanent R2 URL. Rebuild the
@@ -623,7 +665,7 @@ const server = createServer(async (request, response) => {
       const feedback = feedbackSummary(project.id, await feedbackRows(project.id), null);
       const job = evidenceJobPayload(evidenceJobs.get(project.id));
       if (job) return sendJson(response, 200, { data: { projectId: project.id, ...job, items: evidenceItemsForProject(project, job.files.length || job.attachmentIds.length), attachmentCount: job.files.length || job.attachmentIds.length, imageUrls: job.files.map((file) => file.url).filter(Boolean), sourceUrl: project.sourceUrl, fetchTimestamp: project.fetchTimestamp } });
-      const files = (project.attachmentCandidates || []).map(({ localPath, ...file }) => ({ ...file, sourceAttachmentId: file.attachmentId || file.sourceAttachmentId || null, status: file.r2Url ? 'stored' : 'discovered' }));
+      const files = (project.attachmentCandidates || []).filter((file) => !isQuarantinedLiveEvidence(project, file.attachmentId || file.sourceAttachmentId)).map(({ localPath, ...file }) => ({ ...file, sourceAttachmentId: file.attachmentId || file.sourceAttachmentId || null, status: file.r2Url ? 'stored' : 'discovered' }));
       const publicFiles = files.map((file) => ({ ...file, url: publicEvidenceUrl(project.id, file) }));
       if (!publicFiles.length && !project.attachmentIds.length) void runEvidenceJob(project);
       const queued = evidenceJobPayload(evidenceJobs.get(project.id));
