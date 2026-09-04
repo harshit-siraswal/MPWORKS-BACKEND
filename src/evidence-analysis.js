@@ -30,7 +30,10 @@ export async function analyzeEvidenceAgainstProject(project, files = []) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
     body: JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { temperature: 0, responseMimeType: 'application/json' } }),
-    signal: AbortSignal.timeout(90_000)
+    // PDFs are sent as inline Gemini parts. Most complete quickly, but the
+    // official source files can be image-heavy and occasionally need longer
+    // than the old 90-second ceiling on the small EC2 host.
+    signal: AbortSignal.timeout(180_000)
   });
   if (!response.ok) throw new Error(`Gemini evidence analysis failed with HTTP ${response.status}: ${await response.text()}`);
   const payload = await response.json();
