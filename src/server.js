@@ -308,7 +308,9 @@ const server = createServer(async (request, response) => {
       const sourceRefs = recovered ? await attachmentIdsFor(project, recovered.raw) : project.attachmentIds.map((id) => ({ id }));
       sourceProject.attachmentIds = sourceRefs.map((item) => item.id).filter(Boolean);
       const attachmentOrigin = process.env.MPLADS_API_ORIGIN || 'https://mplads.mospi.gov.in';
-      const evidence = sourceProject.attachmentCandidates?.length
+      const evidence = sourceRefs.length
+        ? await fetchAndAnalyzeAttachments(sourceProject.attachmentIds, attachmentOrigin)
+        : sourceProject.attachmentCandidates?.length
         ? await analyzeStoredAttachments(sourceProject.attachmentCandidates)
         : sourceProject.imageUrls.length
         ? await fetchAndAnalyzeImages(sourceProject.imageUrls)
