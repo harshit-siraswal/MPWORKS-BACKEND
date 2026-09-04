@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { appendFile, mkdir, readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { createServer } from 'node:http';
 import { attachmentIdsFromReferenceRows, getAttachment, getAttachmentReferences, getStates, getTenures, getWorkReport, getMetrics as getLiveMetrics } from './esakshi-source.js';
 import { listProjects, getProject, getSummary, getSourceHealth, getFacets, getSourceMetadata, getMetrics, getVillages, getMembers, getMember } from './catalog.js';
@@ -134,6 +136,19 @@ function publicEvidenceForProject(evidence, projectId) {
   return result;
 }
 
+async function appendEvidenceIndex(project, files) {
+  if (project.source !== 'MPLADS live eSAKSHI ingest' || !files?.length) return;
+  const root = process.env.MPLADS_LIVE_ROOT || join(process.cwd(), 'data', 'raw', 'esakshi');
+  const path = join(root, 'attachments.ndjson');
+  const existing = await readFile(path, 'utf8').catch(() => '');
+  const existingKeys = new Set(existing.split(/\r?\n/).filter(Boolean).flatMap((line) => { try { const row = JSON.parse(line); return [`${row.sourceWorkId}|${row.term}|${row.houseCode}|${row.attachmentId}`]; } catch { return []; } }));
+  const sourceWorkId = project.raw?.sourceWorkId || project.raw?.WORK_RECOMMENDATION_DTL_ID || project.raw?.WORK_ID;
+  const rows = files.map((file) => ({ sourceWorkId: sourceWorkId == null ? null : String(sourceWorkId), term: project.term, houseCode: project.house === 'Rajya Sabha' ? '1' : '2', flag: file.flag || project.raw?.flag || project.raw?.FLAG || 3, attachmentId: file.sourceAttachmentId, fileName: file.fileName || null, mimeType: file.mimeType || null, sha256: file.sha256 || null, bytes: file.bytes || null, r2Key: file.r2Key || null, r2Url: file.r2Url || file.url || null, sourceUrl: file.sourceUrl || null, analyzedAt: file.analyzedAt || new Date().toISOString(), analyzer: file.analyzer || 'on-demand-evidence' })).filter((row) => row.sourceWorkId && row.attachmentId && row.r2Url && !existingKeys.has(`${row.sourceWorkId}|${row.term}|${row.houseCode}|${row.attachmentId}`));
+  if (!rows.length) return;
+  await mkdir(root, { recursive: true });
+  await appendFile(path, rows.map((row) => JSON.stringify(row)).join('\n') + '\n', 'utf8');
+}
+
 function evidenceItemsForProject(project, attachmentCount) {
   return (project.evidenceItems || []).map((item) => item.type === 'image' ? { ...item, status: attachmentCount ? 'available' : item.status } : item);
 }
@@ -194,6 +209,7 @@ async function runEvidenceJob(project) {
     // public payload after persistence so clients never receive a stale proxy
     // URL built from a SHA-256 content hash.
     const persistedFiles = publicEvidenceForProject(evidence, project.id);
+    try { await appendEvidenceIndex(project, persistedFiles.files); } catch (error) { persistence = { ...persistence, warnings: [...(persistence?.warnings || []), `Evidence index update failed: ${error.message}`] }; }
     if (evidence.files.length) {
       // Keep the in-process catalog consistent with the evidence endpoint so
       // MP profiles and work tables stop showing 0 immediately after a
@@ -252,7 +268,10 @@ function districtMetrics(filters) {
 
 function riskIndex(project, comparison = null, evidenceCount = project.attachmentCandidates?.length || project.attachmentIds?.length || 0, feedback = null) {
   const missing = ['state', 'district', 'constituency', 'mp', 'status'].filter((field) => !String(project[field] || '').trim());
-  let score = comparison?.consistency === 'inconsistent' ? 82 : comparison?.consistency === 'consistent' ? 18 : evidenceCount ? 34 : 55;
+  let score = comparison?.consistency === 'inconsistent' ? 82 : comparison?.consistency === 'consistent' ? 18 : evidenceCount ? 34 : 48;
+  if (!comparison && !evidenceCount && /completed|partially completed|physical inspection/i.test(project.status || '')) score += 12;
+  if (!comparison && !evidenceCount && /unsanctioned|action pending/i.test(project.status || '')) score += 6;
+  if (!comparison && !evidenceCount && !String(project.amount || '').trim()) score += 5;
   if (feedback?.averageRating != null) score += Math.round((5 - Number(feedback.averageRating)) * 2);
   score += Math.min(Number(feedback?.commentCount || 0) + Number(feedback?.photoCount || 0), 3);
   score = Math.max(0, Math.min(100, score + Math.min(missing.length * 4, 16)));
