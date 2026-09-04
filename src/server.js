@@ -304,7 +304,7 @@ const server = createServer(async (request, response) => {
     if (!project) return sendJson(response, 404, { error: 'project_not_found' });
     try {
       const recovered = await recoverSourceProject(project);
-      const sourceProject = recovered ? { ...project, raw: recovered.raw, attachmentIds: [], attachmentCandidates: [] } : project;
+      const sourceProject = recovered ? { ...project, raw: recovered.raw, attachmentIds: [], attachmentCandidates: project.attachmentCandidates || [] } : project;
       const sourceRefs = recovered ? await attachmentIdsFor(project, recovered.raw) : (sourceProject.attachmentCandidates?.length ? [] : project.attachmentIds.map((id) => ({ id })));
       sourceProject.attachmentIds = sourceRefs.map((item) => item.id).filter(Boolean);
       const attachmentOrigin = process.env.MPLADS_API_ORIGIN || 'https://mplads.mospi.gov.in';
