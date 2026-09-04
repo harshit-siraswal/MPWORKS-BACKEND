@@ -18,6 +18,7 @@ const geocodeCache = new Map();
 const memberImageCache = new Map();
 const recoveredSourceCache = new Map();
 const evidenceJobs = new Map();
+const comparisonCache = new Map();
 const feedbackMemory = new Map();
 const feedbackRateLimit = new Map();
 const INR = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 });
@@ -126,8 +127,8 @@ function isContentHash(value) { return /^[0-9a-f]{64}$/i.test(String(value || ''
 
 function publicEvidenceUrl(projectId, file) {
   if (file.r2Url) return file.r2Url;
-  if (file.sourceUrl && /^https?:\/\//i.test(file.sourceUrl)) return file.sourceUrl;
   if (file.sourceAttachmentId) return attachmentProxyUrl(projectId, file.sourceAttachmentId);
+  if (file.sourceUrl && /^https?:\/\//i.test(file.sourceUrl)) return file.sourceUrl;
   return null;
 }
 
@@ -272,10 +273,34 @@ async function fetchStoredDocumentBinary(id) {
         if (!response.ok) continue;
         const buffer = Buffer.from(await response.arrayBuffer());
         if (!buffer.length || buffer.length > 25 * 1024 * 1024) continue;
+        const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+        const looksLikePdf = buffer.subarray(0, 4).toString() === '%PDF';
+        const looksLikeImage = /^image\//.test(contentType) || buffer.subarray(0, 3).toString('hex') === 'ffd8ff' || buffer.subarray(0, 8).toString('hex') === '89504e470d0a1a0a';
+        if (document.mime_type === 'application/pdf' && !looksLikePdf) continue;
+        if (document.mime_type?.startsWith('image/') && !looksLikeImage) continue;
         return { buffer, fileName: document.source_file_name || 'evidence', mimeType: document.mime_type || 'application/octet-stream' };
       }
     } catch { /* the source attachment fallback below remains available */ }
   }
+  return null;
+}
+
+async function storedProjectComparison(project) {
+  if (!supabaseConfigured()) return null;
+  const cached = comparisonCache.get(project.id);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+  const ids = [...new Set([...(project.attachmentIds || []), ...(project.attachmentCandidates || []).map((file) => file.sourceAttachmentId || file.attachmentId).filter(Boolean)])].slice(0, 12);
+  for (const id of ids) {
+    try {
+      const rows = await supabaseSelect('project_documents', `select=analysis&source_attachment_id=eq.${encodeURIComponent(String(id))}&limit=1`);
+      const value = rows?.[0]?.analysis?.projectComparison;
+      if (value && typeof value === 'object') {
+        comparisonCache.set(project.id, { value, expiresAt: Date.now() + 5 * 60 * 1000 });
+        return value;
+      }
+    } catch { /* the evidence endpoint can still serve the stored file */ }
+  }
+  comparisonCache.set(project.id, { value: null, expiresAt: Date.now() + 60 * 1000 });
   return null;
 }
 
@@ -604,7 +629,8 @@ const server = createServer(async (request, response) => {
       const queued = evidenceJobPayload(evidenceJobs.get(project.id));
       if (queued) return sendJson(response, 200, { data: { projectId: project.id, ...queued, items: evidenceItemsForProject(project, queued.files.length || queued.attachmentIds.length), attachmentCount: queued.files.length || queued.attachmentIds.length, imageUrls: queued.files.map((file) => file.url).filter(Boolean), sourceUrl: project.sourceUrl, fetchTimestamp: project.fetchTimestamp } });
       const sourceRefs = project.attachmentIds.map((id) => ({ id }));
-      return sendJson(response, 200, { data: { projectId: project.id, status: publicFiles.length ? 'available' : 'not-available', liveSourceWorkId: null, attachmentIds: sourceRefs.map((item) => item.id).filter(Boolean), items: evidenceItemsForProject(project, publicFiles.length || sourceRefs.length), signals: project.signals, riskIndex: riskIndex(project, null, publicFiles.length || sourceRefs.length, feedback), publicFeedback: feedback, files: publicFiles, images: publicFiles.filter((file) => file.mimeType?.startsWith('image/')), documents: publicFiles.filter((file) => file.mimeType === 'application/pdf'), imageUrls: publicFiles.map((file) => file.url).filter(Boolean), attachmentCount: publicFiles.length || sourceRefs.length, sourceUrl: project.sourceUrl, fetchTimestamp: project.fetchTimestamp } });
+      const cachedComparison = publicFiles.length ? await storedProjectComparison(project) : null;
+      return sendJson(response, 200, { data: { projectId: project.id, status: publicFiles.length ? cachedComparison ? 'analyzed' : 'available' : 'not-available', liveSourceWorkId: null, attachmentIds: sourceRefs.map((item) => item.id).filter(Boolean), items: evidenceItemsForProject(project, publicFiles.length || sourceRefs.length), signals: project.signals, riskIndex: riskIndex(project, cachedComparison, publicFiles.length || sourceRefs.length, feedback), comparison: cachedComparison || { status: 'queued', reason: publicFiles.length ? 'Evidence is available; AI comparison has not been completed for this record.' : 'No evidence comparison is available.' }, publicFeedback: feedback, files: publicFiles, images: publicFiles.filter((file) => file.mimeType?.startsWith('image/')), documents: publicFiles.filter((file) => file.mimeType === 'application/pdf'), imageUrls: publicFiles.map((file) => file.url).filter(Boolean), attachmentCount: publicFiles.length || sourceRefs.length, sourceUrl: project.sourceUrl, fetchTimestamp: project.fetchTimestamp } });
     }
     const feedback = feedbackSummary(project.id, await feedbackRows(project.id), null);
     return sendJson(response, 200, { data: { ...project, amountEstimate: estimateProjectAmount(project), riskIndex: riskIndex(project, null, undefined, feedback), publicFeedback: feedback } });
