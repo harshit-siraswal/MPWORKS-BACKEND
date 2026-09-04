@@ -36,7 +36,28 @@ const snapshotWithoutLiveDuplicates = snapshotCatalog.filter((project) => { cons
 const catalog = [...snapshotWithoutLiveDuplicates, ...liveCatalog];
 const projectById = new Map(catalog.map((project) => [project.id, project]));
 const unique = (items) => [...new Set(items.filter(Boolean))].sort((a, b) => a.localeCompare(b));
-export function listProjects(filters = {}) { const query = clean(filters.query).toLowerCase(); return catalog.filter((project) => { const haystack = `${project.title} ${project.location} ${project.villageRaw} ${project.villageNames.join(' ')} ${project.city} ${project.ward} ${project.mp} ${project.category} ${project.raw.WORK || ''}`.toLowerCase(); return (!query || haystack.includes(query)) && (!filters.mp || filters.mp === 'All MPs' || project.mp === filters.mp) && (!filters.house || filters.house === 'All houses' || project.house === filters.house) && (!filters.term || filters.term === 'All terms' || project.term === filters.term) && (!filters.memberType || filters.memberType === 'All member types' || project.memberType === filters.memberType) && (!filters.state || filters.state === 'All states' || project.state === filters.state) && (!filters.district || filters.district === 'All districts' || project.district === filters.district) && (!filters.constituency || filters.constituency === 'All constituencies' || project.constituency === filters.constituency) && (!filters.category || filters.category === 'All categories' || project.category === filters.category) && (!filters.status || filters.status === 'All statuses' || project.status === filters.status); }); }
+const districtStateCounts = new Map();
+for (const project of catalog) {
+  const district = clean(project.district).toUpperCase();
+  const state = clean(project.state).toUpperCase();
+  if (!district || !state) continue;
+  const states = districtStateCounts.get(district) || new Map();
+  states.set(state, (states.get(state) || 0) + 1);
+  districtStateCounts.set(district, states);
+}
+function districtBelongsToState(project) {
+  const district = clean(project.district).toUpperCase();
+  const state = clean(project.state).toUpperCase();
+  const counts = districtStateCounts.get(district);
+  if (!counts || counts.size < 2) return true;
+  const ordered = [...counts.entries()].sort((left, right) => right[1] - left[1]);
+  const total = ordered.reduce((sum, [, count]) => sum + count, 0);
+  const dominant = ordered[0];
+  // Remove obvious source cross-state contamination (for example ALWAR in
+  // Uttar Pradesh) while retaining genuinely shared district names.
+  return state === dominant[0] || dominant[1] / total < 0.8;
+}
+export function listProjects(filters = {}) { const query = clean(filters.query).toLowerCase(); return catalog.filter((project) => { const haystack = `${project.title} ${project.location} ${project.villageRaw} ${project.villageNames.join(' ')} ${project.city} ${project.ward} ${project.mp} ${project.category} ${project.raw.WORK || ''}`.toLowerCase(); return (!query || haystack.includes(query)) && (!filters.mp || filters.mp === 'All MPs' || project.mp === filters.mp) && (!filters.house || filters.house === 'All houses' || project.house === filters.house) && (!filters.term || filters.term === 'All terms' || project.term === filters.term) && (!filters.memberType || filters.memberType === 'All member types' || project.memberType === filters.memberType) && (!filters.state || filters.state === 'All states' || project.state === filters.state) && districtBelongsToState(project) && (!filters.district || filters.district === 'All districts' || project.district === filters.district) && (!filters.constituency || filters.constituency === 'All constituencies' || project.constituency === filters.constituency) && (!filters.category || filters.category === 'All categories' || project.category === filters.category) && (!filters.status || filters.status === 'All statuses' || project.status === filters.status); }); }
 export function getProject(id) { return projectById.get(String(id)); }
 export function getFacets(filters = {}) { const scoped = listProjects(filters); return { terms: ['17th Lok Sabha', '18th Lok Sabha'], houses: ['Lok Sabha', 'Rajya Sabha'], memberTypes: unique(catalog.map((project) => project.memberType)), states: unique((filters.house || filters.term) ? scoped.map((project) => project.state) : catalog.map((project) => project.state)), districts: unique(scoped.map((project) => project.district)), constituencies: unique(scoped.map((project) => project.constituency)), categories: unique(scoped.map((project) => project.category)), statuses: unique(scoped.map((project) => project.status)) }; }
 function metricNumber(value) { const number = Number(String(Array.isArray(value) ? value[0] : value ?? '').replace(/[^0-9.-]/g, '')); return Number.isFinite(number) ? number : null; }
