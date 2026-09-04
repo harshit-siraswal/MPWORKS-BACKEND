@@ -10,6 +10,7 @@ import { persistEvidence } from './persistence/evidence.js';
 import { getDistrictAnalysis, startDistrictAnalysis } from './district-analysis.js';
 import { putR2Object, r2Configured } from './persistence/r2.js';
 import { supabaseConfigured, supabaseInsert, supabaseSelect, supabaseUpdate } from './persistence/supabase.js';
+import { estimateProjectAmount } from './amount-estimation.js';
 
 const port = Number(process.env.PORT || 8000);
 const geocodeCache = new Map();
@@ -18,6 +19,7 @@ const recoveredSourceCache = new Map();
 const evidenceJobs = new Map();
 const feedbackMemory = new Map();
 const feedbackRateLimit = new Map();
+const INR = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 });
 
 function sendJson(response, status, payload) {
   response.writeHead(status, {
@@ -249,7 +251,7 @@ async function fetchAttachmentBinary(id) {
 function publicProject(project, feedback = null) {
   const { raw, normalized, evidenceItems, signals, attachmentCandidates, imageUrls, attachmentIds, ...safeProject } = project;
   const sourceMayHaveEvidence = Boolean(raw?.FILE_STATUS || raw?.fileStatus) || /completed|partially completed|physical inspection/i.test(project.status || '');
-  return { ...safeProject, imageCount: imageUrls.length, attachmentCount: attachmentIds.length, evidenceStatus: attachmentIds.length ? 'indexed' : sourceMayHaveEvidence ? 'source-pending-index' : 'not-reported-by-source', publicFeedback: feedback || { ratingCount: 0, averageRating: null, photoCount: 0, commentCount: 0 }, riskIndex: riskIndex(project, null, undefined, feedback) };
+  return { ...safeProject, amountEstimate: estimateProjectAmount(project), imageCount: imageUrls.length, attachmentCount: attachmentIds.length, evidenceStatus: attachmentIds.length ? 'indexed' : sourceMayHaveEvidence ? 'source-pending-index' : 'not-reported-by-source', publicFeedback: feedback || { ratingCount: 0, averageRating: null, photoCount: 0, commentCount: 0 }, riskIndex: riskIndex(project, null, undefined, feedback) };
 }
 
 function amountFromProject(project, field, normalizedField) {
@@ -274,6 +276,9 @@ function riskIndex(project, comparison = null, evidenceCount = project.attachmen
   if (!comparison && !evidenceCount && !String(project.amount || '').trim()) score += 5;
   if (feedback?.averageRating != null) score += Math.round((5 - Number(feedback.averageRating)) * 2);
   score += Math.min(Number(feedback?.commentCount || 0) + Number(feedback?.photoCount || 0), 3);
+  const estimate = estimateProjectAmount(project);
+  const variance = Math.abs(Number(estimate.variancePercent));
+  if (Number.isFinite(variance) && variance > 25) score += Math.min(18, Math.round((variance - 25) * 0.24));
   score = Math.max(0, Math.min(100, score + Math.min(missing.length * 4, 16)));
   const label = score >= 75 ? 'High review priority' : score >= 50 ? 'Elevated review priority' : score >= 30 ? 'Moderate review priority' : 'Lower review priority';
   const reason = comparison?.consistency === 'inconsistent'
@@ -285,18 +290,22 @@ function riskIndex(project, comparison = null, evidenceCount = project.attachmen
         : 'No image or PDF evidence is currently available. This is an evidence-coverage limitation, not proof of fraud.';
   const contributionCount = Number(feedback?.commentCount || 0) + Number(feedback?.photoCount || 0);
   const feedbackReason = feedback?.ratingCount ? ` Public feedback averages ${feedback.averageRating}/10 across ${feedback.ratingCount} rating${feedback.ratingCount === 1 ? '' : 's'} and includes ${contributionCount} field contribution${contributionCount === 1 ? '' : 's'}.` : '';
-  return { score, label, reason: `${reason}${feedbackReason}`, confidence: Number(comparison?.confidence) || (comparison ? 25 : 10), basis: `${comparison ? 'AI evidence comparison plus source-field checks' : 'Source-field completeness and evidence availability; AI comparison pending'}${feedback?.ratingCount ? ' plus public feedback' : ''}` };
+  const amountReason = estimate.variancePercent == null
+    ? ` Amount comparison is unavailable because the source does not expose a usable allocated, sanctioned, or utilized amount. AI estimate: ${estimate.rangeFormatted}.`
+    : ` AI-assisted amount estimate is ${estimate.formatted} (${estimate.rangeFormatted}); official ${estimate.observedAmountKind} amount is ${INR.format(estimate.observedAmountInr)} (${estimate.varianceLabel}). This variance is a review signal, not proof of fraud.`;
+  return { score, label, reason: `${reason}${amountReason}${feedbackReason}`, confidence: Number(comparison?.confidence) || (comparison ? 25 : 10), basis: `${comparison ? 'AI evidence comparison plus source-field checks' : 'Source-field completeness and evidence availability; AI comparison pending'} plus description-cost estimate${feedback?.ratingCount ? ' and public feedback' : ''}` };
 }
 
 function exportRows(filters) {
   return listProjects(filters).map((project) => {
     const evidenceLinks = [...(project.imageUrls || []), ...(project.attachmentIds || []).map((id) => attachmentProxyUrl(project.id, id))].filter(Boolean);
     const risk = riskIndex(project);
-    return { project_id: project.id, work_description: project.title, member_of_parliament: project.mp, house: project.house, term: project.term, state: project.state, district: project.district, constituency: project.constituency, village_or_area: project.villageRaw || project.villageNames?.join(' | '), category: project.category, status: project.status, recommended_amount: project.amount, source_date: project.sourceDate, review_index: `${risk.score}/100`, review_label: risk.label, review_reason: risk.reason, evidence_links: evidenceLinks.join(' | '), official_source: project.sourceUrl };
+    const estimate = estimateProjectAmount(project);
+    return { project_id: project.id, work_description: project.title, member_of_parliament: project.mp, house: project.house, term: project.term, state: project.state, district: project.district, constituency: project.constituency, village_or_area: project.villageRaw || project.villageNames?.join(' | '), category: project.category, status: project.status, recommended_amount: project.amount, ai_estimated_amount: estimate.formatted, ai_estimate_range: estimate.rangeFormatted, observed_amount: estimate.observedAmountInr ? INR.format(estimate.observedAmountInr) : '', amount_variance: estimate.varianceAmountInr == null ? '' : INR.format(estimate.varianceAmountInr), amount_variance_percent: estimate.variancePercent == null ? '' : `${estimate.variancePercent}%`, amount_estimate_reason: estimate.reason, source_date: project.sourceDate, review_index: `${risk.score}/100`, review_label: risk.label, review_reason: risk.reason, evidence_links: evidenceLinks.join(' | '), official_source: project.sourceUrl };
   });
 }
 
-const exportHeaders = ['project_id', 'work_description', 'member_of_parliament', 'house', 'term', 'state', 'district', 'constituency', 'village_or_area', 'category', 'status', 'recommended_amount', 'source_date', 'review_index', 'review_label', 'review_reason', 'evidence_links', 'official_source'];
+const exportHeaders = ['project_id', 'work_description', 'member_of_parliament', 'house', 'term', 'state', 'district', 'constituency', 'village_or_area', 'category', 'status', 'recommended_amount', 'ai_estimated_amount', 'ai_estimate_range', 'observed_amount', 'amount_variance', 'amount_variance_percent', 'amount_estimate_reason', 'source_date', 'review_index', 'review_label', 'review_reason', 'evidence_links', 'official_source'];
 function exportCell(value) { return `"${String(value ?? '').replace(/"/g, '""')}"`; }
 function csvExport(rows) { return [exportHeaders.join(','), ...rows.map((row) => exportHeaders.map((header) => exportCell(row[header])).join(','))].join('\r\n'); }
 function excelExport(rows) { const headings = exportHeaders.map((header) => `<th>${header.replace(/_/g, ' ')}</th>`).join(''); const body = rows.map((row) => `<tr>${exportHeaders.map((header) => `<td>${String(row[header] ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')}</td>`).join('')}</tr>`).join(''); return `<!doctype html><html><head><meta charset="utf-8"><style>table{border-collapse:collapse}th,td{border:1px solid #ccd6df;padding:5px;vertical-align:top}th{background:#eaf2f7}</style></head><body><table><thead><tr>${headings}</tr></thead><tbody>${body}</tbody></table></body></html>`; }
@@ -536,7 +545,7 @@ const server = createServer(async (request, response) => {
       return sendJson(response, 200, { data: { projectId: project.id, status: publicFiles.length ? 'available' : 'not-available', liveSourceWorkId: null, attachmentIds: sourceRefs.map((item) => item.id).filter(Boolean), items: evidenceItemsForProject(project, publicFiles.length || sourceRefs.length), signals: project.signals, riskIndex: riskIndex(project, null, publicFiles.length || sourceRefs.length, feedback), publicFeedback: feedback, files: publicFiles, images: publicFiles.filter((file) => file.mimeType?.startsWith('image/')), documents: publicFiles.filter((file) => file.mimeType === 'application/pdf'), imageUrls: publicFiles.map((file) => file.url).filter(Boolean), attachmentCount: publicFiles.length || sourceRefs.length, sourceUrl: project.sourceUrl, fetchTimestamp: project.fetchTimestamp } });
     }
     const feedback = feedbackSummary(project.id, await feedbackRows(project.id), null);
-    return sendJson(response, 200, { data: { ...project, riskIndex: riskIndex(project, null, undefined, feedback), publicFeedback: feedback } });
+    return sendJson(response, 200, { data: { ...project, amountEstimate: estimateProjectAmount(project), riskIndex: riskIndex(project, null, undefined, feedback), publicFeedback: feedback } });
   }
 
   if (projectMatch && request.method === 'POST' && projectMatch[2] === 'reports') {
