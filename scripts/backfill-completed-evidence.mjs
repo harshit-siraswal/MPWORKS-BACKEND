@@ -236,7 +236,9 @@ class EvidenceIndex {
     this.rows.push(row);
     this.byRelation.set(key, row);
     if (row.sha256 && row.r2Key && !this.byHash.has(row.sha256)) this.byHash.set(row.sha256, row);
-    await appendFile(this.filePath, `${JSON.stringify(row)}\n`, 'utf8');
+    let separator = '';
+    try { separator = (await readFile(this.filePath, 'utf8')).endsWith('\n') ? '' : '\n'; } catch { /* the append creates a new file */ }
+    await appendFile(this.filePath, `${separator}${JSON.stringify(row)}\n`, 'utf8');
     return { row, uploaded: true, indexed: true };
   }
 

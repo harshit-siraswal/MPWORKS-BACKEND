@@ -148,7 +148,8 @@ async function appendEvidenceIndex(project, files) {
   const rows = files.map((file) => ({ sourceWorkId: sourceWorkId == null ? null : String(sourceWorkId), term: project.term, houseCode: project.house === 'Rajya Sabha' ? '1' : '2', flag: file.flag || project.raw?.flag || project.raw?.FLAG || 3, attachmentId: file.sourceAttachmentId, fileName: file.fileName || null, mimeType: file.mimeType || null, sha256: file.sha256 || null, bytes: file.bytes || null, r2Key: file.r2Key || null, r2Url: file.r2Url || file.url || null, sourceUrl: file.sourceUrl || null, analyzedAt: file.analyzedAt || new Date().toISOString(), analyzer: file.analyzer || 'on-demand-evidence' })).filter((row) => row.sourceWorkId && row.attachmentId && row.r2Url && !existingKeys.has(`${row.sourceWorkId}|${row.term}|${row.houseCode}|${row.attachmentId}`));
   if (!rows.length) return;
   await mkdir(root, { recursive: true });
-  await appendFile(path, rows.map((row) => JSON.stringify(row)).join('\n') + '\n', 'utf8');
+  const separator = existing && !existing.endsWith('\n') ? '\n' : '';
+  await appendFile(path, separator + rows.map((row) => JSON.stringify(row)).join('\n') + '\n', 'utf8');
 }
 
 function evidenceItemsForProject(project, attachmentCount) {
