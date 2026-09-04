@@ -212,7 +212,10 @@ async function runEvidenceJob(project) {
     // with the exact source row. This is deliberately per-project and only
     // runs on an empty result, keeping the normal path fast while fixing the
     // completed-work evidence gap.
-    const recovered = directRefs.length ? null : await recoverSourceProject(project);
+    // An empty, fully completed lookup is an authoritative "no attachment"
+    // result. Only rehydrate the source report when the lookup itself failed;
+    // otherwise every no-file project incurred several slow report downloads.
+    const recovered = directRefs.length || (directLookup?.complete && isLiveProject) ? null : await recoverSourceProject(project);
     let recoveredLookup = null;
     if (recovered && (isLiveProject || !directRefs.length)) {
       recoveredLookup = await attachmentLookupFor(recovered.raw, [recovered.raw?.FLAG, 1, 2, 3]);
