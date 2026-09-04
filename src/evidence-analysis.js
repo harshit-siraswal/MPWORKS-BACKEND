@@ -26,16 +26,23 @@ export async function analyzeEvidenceAgainstProject(project, files = []) {
   };
   const parts = [{ text: `You are reviewing public-works evidence for human investigators. Compare the supplied image/PDF evidence with this source project record. Do not invent facts, do not identify a person as fraudulent, and do not call an inconsistency proof of fraud. Return JSON only with this shape: {"consistency":"consistent|inconclusive|inconsistent","confidence":0,"possibleIssues":[],"evidenceFindings":[],"metadataChecks":{"location":"supported|not_supported|not_visible","workType":"supported|not_supported|not_visible","amount":"supported|not_verifiable","completion":"supported|not_supported|not_visible"},"requiresHumanReview":true,"summary":""}. Mark requiresHumanReview true whenever evidence is missing, unreadable, or only partially comparable. Source project record: ${JSON.stringify(projectRecord)}` }];
   for (const file of evidence) parts.push({ inlineData: { mimeType: file.mimeType, data: file.buffer.toString('base64') } });
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
-    body: JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { temperature: 0, responseMimeType: 'application/json' } }),
-    // PDFs are sent as inline Gemini parts. Most complete quickly, but the
-    // official source files can be image-heavy and occasionally need longer
-    // than the old 90-second ceiling on the small EC2 host.
-    signal: AbortSignal.timeout(180_000)
-  });
-  if (!response.ok) throw new Error(`Gemini evidence analysis failed with HTTP ${response.status}: ${await response.text()}`);
+  let response;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
+      body: JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { temperature: 0, responseMimeType: 'application/json' } }),
+      // PDFs are sent as inline Gemini parts. Most complete quickly, but the
+      // official source files can be image-heavy and occasionally need longer
+      // than the old 90-second ceiling on the small EC2 host.
+      signal: AbortSignal.timeout(180_000)
+    });
+    if (response.ok) break;
+    const body = await response.text();
+    const retryable = [429, 500, 502, 503, 504].includes(response.status);
+    if (!retryable || attempt === 2) throw new Error(`Gemini evidence analysis failed with HTTP ${response.status}: ${body}`);
+    await new Promise((resolve) => setTimeout(resolve, 2000 * (attempt + 1)));
+  }
   const payload = await response.json();
   const text = payload.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('') || '';
   const parsed = parseJson(text);
