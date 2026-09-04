@@ -297,7 +297,8 @@ function riskIndex(project, comparison = null, evidenceCount = project.attachmen
 }
 
 function exportRows(filters) {
-  return listProjects(filters).map((project) => {
+  const projects = listProjects(filters).slice(Math.max(Number(filters.offset || 0), 0), Math.max(Number(filters.offset || 0), 0) + Math.min(Math.max(Number(filters.limit || 10000), 1), 10000));
+  return projects.map((project) => {
     const evidenceLinks = [...(project.imageUrls || []), ...(project.attachmentIds || []).map((id) => attachmentProxyUrl(project.id, id))].filter(Boolean);
     const risk = riskIndex(project);
     const estimate = estimateProjectAmount(project);
@@ -384,11 +385,14 @@ const server = createServer(async (request, response) => {
   const exportMatch = url.pathname.match(/^\/api\/exports\/(csv|excel|xls|pdf)$/i);
   if (request.method === 'GET' && exportMatch) {
     const format = exportMatch[1].toLowerCase();
-    const rows = exportRows(filtersFrom(url));
+    const requestedLimit = Number(url.searchParams.get('limit') || 10000);
+    const exportLimit = Number.isFinite(requestedLimit) ? Math.min(Math.max(Math.floor(requestedLimit), 1), 10000) : 10000;
+    const exportOffset = Math.max(Number(url.searchParams.get('offset') || 0), 0);
+    const rows = exportRows({ ...filtersFrom(url), limit: exportLimit, offset: exportOffset });
     const body = format === 'pdf' ? pdfExport(rows) : Buffer.from(format === 'csv' ? csvExport(rows) : excelExport(rows), 'utf8');
     const contentType = format === 'pdf' ? 'application/pdf' : format === 'csv' ? 'text/csv; charset=utf-8' : 'application/vnd.ms-excel; charset=utf-8';
     const extension = format === 'pdf' ? 'pdf' : format === 'csv' ? 'csv' : 'xls';
-    response.writeHead(200, { 'Content-Type': contentType, 'Content-Length': body.length, 'Content-Disposition': `attachment; filename="mpworks-export-${new Date().toISOString().slice(0, 10)}.${extension}"`, 'Access-Control-Allow-Origin': '*' });
+    response.writeHead(200, { 'Content-Type': contentType, 'Content-Length': body.length, 'Content-Disposition': `attachment; filename="mpworks-export-${new Date().toISOString().slice(0, 10)}.${extension}"`, 'Access-Control-Allow-Origin': '*', 'X-Export-Limit': String(exportLimit), 'X-Export-Offset': String(exportOffset) });
     return response.end(body);
   }
   if (request.method === 'GET' && url.pathname === '/api/mps') {
