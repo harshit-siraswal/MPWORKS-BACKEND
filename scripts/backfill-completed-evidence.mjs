@@ -41,13 +41,13 @@ const payloadBuffer = (row) => {
 const files = (await readdir(root)).filter((name) => new RegExp(`^report-.*-Works-${reportType}\\.json$`, 'i').test(name) && (!requestedSourceFile || name === requestedSourceFile));
 const existing = (await readFile(evidenceIndex, 'utf8').catch(() => '')).split(/\r?\n/).filter(Boolean).map(JSON.parse);
 const existingWorkKeys = new Set(existing.map((row) => {
-  const parts = String(row.localPath || '').replaceAll('\\\\', '/').split('/');
+  const parts = String(row.localPath || '').replaceAll('\\', '/').split('/');
   const evidenceIndex = parts.indexOf('esakshi');
   const pathState = evidenceIndex >= 0 ? parts[evidenceIndex + 2]?.replaceAll('-', ' ') : '';
   return `${row.sourceWorkId}|${row.term}|${row.houseCode}|${row.state || pathState || ''}`;
 }));
 const existingWorkIdentities = new Set(existing.map((row) => {
-  const parts = String(row.localPath || '').replaceAll('\\\\', '/').split('/');
+  const parts = String(row.localPath || '').replaceAll('\\', '/').split('/');
   const evidenceIndex = parts.indexOf('esakshi');
   const pathState = evidenceIndex >= 0 ? parts[evidenceIndex + 2]?.replaceAll('-', ' ') : '';
   return `${row.sourceWorkId}|${row.state || pathState || ''}`;
