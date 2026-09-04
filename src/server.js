@@ -127,7 +127,7 @@ function isContentHash(value) { return /^[0-9a-f]{64}$/i.test(String(value || ''
 function publicEvidenceUrl(projectId, file) {
   if (file.r2Url) return file.r2Url;
   if (file.sourceUrl && /^https?:\/\//i.test(file.sourceUrl)) return file.sourceUrl;
-  if (file.sourceAttachmentId && !isContentHash(file.sourceAttachmentId)) return attachmentProxyUrl(projectId, file.sourceAttachmentId);
+  if (file.sourceAttachmentId) return attachmentProxyUrl(projectId, file.sourceAttachmentId);
   return null;
 }
 
@@ -250,6 +250,31 @@ async function fetchAttachmentBinary(id) {
     const fileName = row.FILE_NAME || row.fileName || 'evidence';
     const mimeType = buffer.subarray(0, 4).toString() === '%PDF' || /\.pdf$/i.test(fileName) ? 'application/pdf' : buffer.subarray(0, 3).toString('hex') === 'ffd8ff' ? 'image/jpeg' : buffer.subarray(0, 8).toString('hex') === '89504e470d0a1a0a' ? 'image/png' : 'application/octet-stream';
     return { buffer, fileName, mimeType };
+  }
+  return null;
+}
+
+async function fetchStoredDocumentBinary(id) {
+  if (!supabaseConfigured()) return null;
+  const value = String(id || '');
+  const queries = [
+    `source_attachment_id=eq.${encodeURIComponent(value)}`,
+    ...(isContentHash(value) ? [`sha256=eq.${encodeURIComponent(value)}`] : [])
+  ];
+  for (const query of queries) {
+    try {
+      const rows = await supabaseSelect('project_documents', `select=source_attachment_id,source_file_name,mime_type,r2_url,source_url&${query}&limit=1`);
+      const document = rows?.[0];
+      if (!document) continue;
+      for (const url of [document.r2_url, document.source_url]) {
+        if (!/^https?:\/\//i.test(String(url || ''))) continue;
+        const response = await fetch(url, { signal: AbortSignal.timeout(20_000), headers: { 'User-Agent': 'MPWorks/0.1 evidence-viewer' } });
+        if (!response.ok) continue;
+        const buffer = Buffer.from(await response.arrayBuffer());
+        if (!buffer.length || buffer.length > 25 * 1024 * 1024) continue;
+        return { buffer, fileName: document.source_file_name || 'evidence', mimeType: document.mime_type || 'application/octet-stream' };
+      }
+    } catch { /* the source attachment fallback below remains available */ }
   }
   return null;
 }
@@ -525,7 +550,8 @@ const server = createServer(async (request, response) => {
     const project = getProject(decodeURIComponent(attachmentMatch[1]));
     if (!project) return sendJson(response, 404, { error: 'project_not_found' });
     try {
-      const attachment = await fetchAttachmentBinary(decodeURIComponent(attachmentMatch[2]));
+      const attachmentId = decodeURIComponent(attachmentMatch[2]);
+      const attachment = await fetchStoredDocumentBinary(attachmentId) || await fetchAttachmentBinary(attachmentId);
       if (!attachment) return sendJson(response, 404, { error: 'attachment_payload_not_found' });
       response.writeHead(200, { 'Content-Type': attachment.mimeType, 'Content-Length': attachment.buffer.length, 'Cache-Control': 'private, max-age=300', 'Content-Disposition': `inline; filename="${String(attachment.fileName || 'evidence').replace(/[^a-z0-9._-]/gi, '_')}"` });
       return response.end(attachment.buffer);
