@@ -165,6 +165,8 @@ async function runEvidenceJob(project) {
   const job = { status: 'processing', note: 'Fetching official source files and preparing AI analysis…', files: [], images: [], documents: [], attachmentIds: [], liveSourceWorkId: null, persistence: { r2: 'pending', supabase: 'pending', stored: [], warnings: [] } };
   evidenceJobs.set(project.id, job);
   try {
+    Object.assign(job, { status: 'fetching', note: 'Fetching the official eSAKSHI attachment record before starting AI analysis…' });
+    evidenceJobs.set(project.id, job);
     // The live catalog stores the normalized work row, which already contains
     // enough identifiers for getAttachIdsbyFlag. This avoids scanning a whole
     // state report for every project and is the critical path for completed
@@ -188,7 +190,7 @@ async function runEvidenceJob(project) {
     const sourceRefs = directRefs.length ? directRefs : recovered ? await attachmentIdsFor(project, recovered.raw) : (sourceProject.attachmentCandidates?.length ? [] : project.attachmentIds.map((id) => ({ id })));
     sourceProject.attachmentIds = sourceRefs.map((item) => item.id).filter(Boolean);
     if (sourceProject.attachmentIds.length) {
-      Object.assign(job, { status: 'analyzing', note: `Found ${sourceProject.attachmentIds.length} official attachment identifiers. Downloading source files…`, attachmentIds: sourceProject.attachmentIds, liveSourceWorkId: recovered?.sourceId || null });
+      Object.assign(job, { status: 'fetching', note: `Found ${sourceProject.attachmentIds.length} official attachment identifiers. Downloading source files…`, attachmentIds: sourceProject.attachmentIds, liveSourceWorkId: recovered?.sourceId || null });
       evidenceJobs.set(project.id, job);
     }
     const attachmentOrigin = process.env.MPLADS_API_ORIGIN || 'https://mplads.mospi.gov.in';
@@ -201,7 +203,7 @@ async function runEvidenceJob(project) {
       ? 'The live eSAKSHI record does not expose an image or PDF attachment identifier.'
       : 'This older work-list snapshot has no attachment identifier. The official live eSAKSHI record could not be matched to this row.';
     const feedback = feedbackSummary(project.id, await feedbackRows(project.id), null);
-    Object.assign(job, { status: evidence.files.length ? 'analyzing' : 'not-available', note: evidence.files.length ? 'Source files were fetched. AI comparison is running; this page will update automatically.' : sourceProject.attachmentIds.length ? 'The official source returned attachment identifiers, but no readable image or PDF payload was returned.' : missingAttachmentNote, ...files, riskIndex: riskIndex(project, null, evidence.files.length, feedback), attachmentIds: sourceProject.attachmentIds, liveSourceWorkId: recovered?.sourceId || null });
+    Object.assign(job, { status: evidence.files.length ? 'analyzing' : 'not-available', note: evidence.files.length ? `Fetched ${evidence.files.length} source file${evidence.files.length === 1 ? '' : 's'}. AI comparison is running; this page will update automatically.` : sourceProject.attachmentIds.length ? 'The official source returned attachment identifiers, but no readable image or PDF payload was returned.' : missingAttachmentNote, ...files, riskIndex: riskIndex(project, null, evidence.files.length, feedback), attachmentIds: sourceProject.attachmentIds, liveSourceWorkId: recovered?.sourceId || null });
     evidenceJobs.set(project.id, job);
     if (!evidence.files.length) return;
     let comparison = { status: 'queued', reason: 'AI evidence comparison is still running.' };
