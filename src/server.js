@@ -10,6 +10,7 @@ const port = Number(process.env.PORT || 8000);
 const geocodeCache = new Map();
 const memberImageCache = new Map();
 const recoveredSourceCache = new Map();
+const evidenceJobs = new Map();
 
 function sendJson(response, status, payload) {
   response.writeHead(status, {
@@ -121,6 +122,39 @@ function publicEvidenceForProject(evidence, projectId) {
 
 function evidenceItemsForProject(project, attachmentCount) {
   return (project.evidenceItems || []).map((item) => item.type === 'image' ? { ...item, status: attachmentCount ? 'available' : item.status } : item);
+}
+
+function evidenceJobPayload(job) {
+  if (!job) return null;
+  return { status: job.status, note: job.note, files: job.files || [], images: job.images || [], documents: job.documents || [], comparison: job.comparison || { status: 'queued', reason: 'AI evidence comparison is still running.' }, persistence: job.persistence || { r2: 'pending', supabase: 'pending', stored: [], warnings: [] }, attachmentIds: job.attachmentIds || [], liveSourceWorkId: job.liveSourceWorkId || null, error: job.error || null };
+}
+
+async function runEvidenceJob(project) {
+  const job = { status: 'processing', note: 'Fetching official source files and preparing AI analysis…', files: [], images: [], documents: [], attachmentIds: [], liveSourceWorkId: null, persistence: { r2: 'pending', supabase: 'pending', stored: [], warnings: [] } };
+  evidenceJobs.set(project.id, job);
+  try {
+    const recovered = await recoverSourceProject(project);
+    const sourceProject = recovered ? { ...project, raw: recovered.raw, attachmentIds: [], attachmentCandidates: project.attachmentCandidates || [] } : project;
+    const sourceRefs = recovered ? await attachmentIdsFor(project, recovered.raw) : (sourceProject.attachmentCandidates?.length ? [] : project.attachmentIds.map((id) => ({ id })));
+    sourceProject.attachmentIds = sourceRefs.map((item) => item.id).filter(Boolean);
+    const attachmentOrigin = process.env.MPLADS_API_ORIGIN || 'https://mplads.mospi.gov.in';
+    let evidence = sourceProject.attachmentCandidates?.length ? await analyzeStoredAttachments(sourceProject.attachmentCandidates) : null;
+    if (!evidence?.files.length) {
+      evidence = sourceRefs.length ? await fetchAndAnalyzeAttachments(sourceProject.attachmentIds, attachmentOrigin) : sourceProject.imageUrls.length ? await fetchAndAnalyzeImages(sourceProject.imageUrls) : await fetchAndAnalyzeAttachments(sourceProject.attachmentIds, attachmentOrigin);
+    }
+    const files = publicEvidenceForProject(evidence, project.id);
+    Object.assign(job, { status: evidence.files.length ? 'analyzing' : 'not-available', note: evidence.files.length ? 'Source files were fetched. AI comparison is running; this page will update automatically.' : sourceProject.attachmentIds.length ? 'The official source returned attachment identifiers, but no readable image or PDF payload was returned.' : 'The live source record does not expose an image or PDF attachment identifier.', ...files, attachmentIds: sourceProject.attachmentIds, liveSourceWorkId: recovered?.sourceId || null });
+    evidenceJobs.set(project.id, job);
+    if (!evidence.files.length) return;
+    let comparison = { status: 'queued', reason: 'AI evidence comparison is still running.' };
+    try { comparison = await analyzeEvidenceAgainstProject(project, evidence.files); } catch (error) { comparison = { status: 'error', reason: error.message }; }
+    let persistence;
+    try { persistence = await persistEvidence(sourceProject, evidence.files, comparison); } catch (error) { persistence = { r2: 'error', supabase: 'error', stored: [], warnings: [error.message] }; }
+    Object.assign(job, { status: 'analyzed', note: 'Source evidence was fetched. Image/PDF bytes were compared with the project metadata; AI findings are triage signals for human review, not a fraud finding.', comparison, persistence });
+  } catch (error) {
+    Object.assign(job, { status: 'failed', error: error.message, note: 'The official source or storage service was temporarily unavailable. Retry this record; no mock evidence was substituted.' });
+  }
+  evidenceJobs.set(project.id, job);
 }
 
 function decodeAttachmentValue(value) {
@@ -302,34 +336,10 @@ const server = createServer(async (request, response) => {
   if (refreshMatch && request.method === 'POST') {
     const project = getProject(refreshMatch[1]);
     if (!project) return sendJson(response, 404, { error: 'project_not_found' });
-    try {
-      const recovered = await recoverSourceProject(project);
-      const sourceProject = recovered ? { ...project, raw: recovered.raw, attachmentIds: [], attachmentCandidates: project.attachmentCandidates || [] } : project;
-      const sourceRefs = recovered ? await attachmentIdsFor(project, recovered.raw) : (sourceProject.attachmentCandidates?.length ? [] : project.attachmentIds.map((id) => ({ id })));
-      sourceProject.attachmentIds = sourceRefs.map((item) => item.id).filter(Boolean);
-      const attachmentOrigin = process.env.MPLADS_API_ORIGIN || 'https://mplads.mospi.gov.in';
-      let evidence = sourceProject.attachmentCandidates?.length ? await analyzeStoredAttachments(sourceProject.attachmentCandidates) : null;
-      if (!evidence?.files.length) {
-        evidence = sourceRefs.length
-          ? await fetchAndAnalyzeAttachments(sourceProject.attachmentIds, attachmentOrigin)
-          : sourceProject.imageUrls.length
-          ? await fetchAndAnalyzeImages(sourceProject.imageUrls)
-          : await fetchAndAnalyzeAttachments(sourceProject.attachmentIds, attachmentOrigin);
-      }
-      let comparison = { status: 'inconclusive', reason: 'No image or PDF evidence was fetched' };
-      let persistence = { r2: 'not-configured', supabase: 'not-configured', stored: [], warnings: [] };
-      if (evidence.files.length) {
-        try { comparison = await analyzeEvidenceAgainstProject(project, evidence.files); } catch (error) { comparison = { status: 'error', reason: error.message }; }
-        try { persistence = await persistEvidence(sourceProject, evidence.files, comparison); } catch (error) { persistence = { r2: 'error', supabase: 'error', stored: [], warnings: [error.message] }; }
-      }
-      const files = publicEvidenceForProject(evidence, project.id);
-      const note = evidence.files.length
-        ? 'Source evidence was fetched. Image/PDF bytes were compared with the project metadata; AI findings are triage signals for human review, not a fraud finding.'
-        : sourceProject.attachmentIds.length ? 'The official source returned attachment identifiers, but no readable image or PDF payload was returned.' : 'The live source record does not expose an image or PDF attachment identifier.';
-      return sendJson(response, 200, { data: { projectId: project.id, liveSourceWorkId: recovered?.sourceId || null, attachmentIds: sourceProject.attachmentIds, ...files, comparison, persistence, status: evidence.files.length ? 'analyzed' : 'not-available', note } });
-    } catch (error) {
-      return sendJson(response, 503, { error: 'evidence_refresh_unavailable', detail: error.message, note: 'The official source or storage service was temporarily unavailable. Retry this record; no mock evidence was substituted.' });
-    }
+    const current = evidenceJobs.get(project.id);
+    if (current?.status === 'processing' || current?.status === 'analyzing') return sendJson(response, 202, { data: { projectId: project.id, ...evidenceJobPayload(current) } });
+    void runEvidenceJob(project);
+    return sendJson(response, 202, { data: { projectId: project.id, status: 'processing', note: 'Evidence fetching and AI analysis has started. This page will update automatically.', files: [], images: [], documents: [], comparison: { status: 'queued', reason: 'Evidence analysis is running.' }, persistence: { r2: 'pending', supabase: 'pending', stored: [], warnings: [] } } });
   }
 
   const attachmentMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/evidence\/attachment\/([^/]+)$/);
@@ -349,6 +359,8 @@ const server = createServer(async (request, response) => {
     const project = getProject(projectMatch[1]);
     if (!project) return sendJson(response, 404, { error: 'project_not_found' });
     if (projectMatch[2] === 'evidence') {
+      const job = evidenceJobPayload(evidenceJobs.get(project.id));
+      if (job) return sendJson(response, 200, { data: { projectId: project.id, ...job, items: evidenceItemsForProject(project, job.files.length || job.attachmentIds.length), attachmentCount: job.files.length || job.attachmentIds.length, imageUrls: job.files.map((file) => file.url).filter(Boolean), sourceUrl: project.sourceUrl, fetchTimestamp: project.fetchTimestamp } });
       const files = (project.attachmentCandidates || []).map(({ localPath, ...file }) => ({ ...file, sourceAttachmentId: file.attachmentId || file.sourceAttachmentId || null, status: file.r2Url ? 'stored' : 'discovered' }));
       const recovered = files.length || project.attachmentIds.length ? null : await recoverSourceProject(project);
       const sourceRefs = recovered ? await attachmentIdsFor(project, recovered.raw) : project.attachmentIds.map((id) => ({ id }));
