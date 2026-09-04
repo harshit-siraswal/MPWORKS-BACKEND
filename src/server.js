@@ -82,7 +82,7 @@ function sourceWorkIdCandidates(project) {
 }
 
 function sourcePayload(project, row) {
-  return { ...row, WORK_RECOMMENDATION_DTL_ID: row.WORK_RECOMMENDATION_DTL_ID || sourceWorkIdCandidates(project)[0], HOUSE_OF_PARLIAMENT: row.HOUSE_OF_PARLIAMENT || (project.house === 'Rajya Sabha' ? '1' : '2'), TENURE: row.TENURE || project.term, STATE_NAME: row.STATE_NAME || project.state, MP_NAME: row.MP_NAME || project.mp, CONSTITUENCY: row.CONSTITUENCY || project.constituency, FLAG: row.FLAG ?? row.flag ?? null, FILE_STATUS: row.FILE_STATUS ?? row.fileStatus ?? true };
+  return { ...row, WORK_CATEGORY: row.WORK_CATEGORY || row.workCategory || project.category, ACTIVITY_NAME: row.ACTIVITY_NAME || row.activityName || project.title, WORK_DESCRIPTION: row.WORK_DESCRIPTION || row.description || project.title, IDA_NAME: row.IDA_NAME || row.implementingAuthority || project.district, CONSTITUENCY_ID: row.CONSTITUENCY_ID || row.constituencyId || null, LETTER_NO: row.LETTER_NO || row.letterNo || null, ACTUAL_AMOUNT: row.ACTUAL_AMOUNT ?? row.actualAmount ?? null, ACTUAL_END_DATE: row.ACTUAL_END_DATE || row.actualEndDate || null, WORK_ID: row.WORK_ID || row.sourceWorkIdPhysical || sourceWorkIdCandidates(project)[0], WORK_RECOMMENDATION_DTL_ID: row.WORK_RECOMMENDATION_DTL_ID || sourceWorkIdCandidates(project)[0], HOUSE_OF_PARLIAMENT: row.HOUSE_OF_PARLIAMENT || (project.house === 'Rajya Sabha' ? '1' : '2'), TENURE: row.TENURE || project.term, STATE_NAME: row.STATE_NAME || project.state, MP_NAME: row.MP_NAME || project.mp, CONSTITUENCY: row.CONSTITUENCY || project.constituency, FLAG: row.FLAG ?? row.flag ?? null, FILE_STATUS: row.FILE_STATUS ?? row.fileStatus ?? true };
 }
 
 async function recoverSourceProject(project) {
