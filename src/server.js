@@ -82,7 +82,7 @@ function sourceWorkIdCandidates(project) {
 }
 
 function sourcePayload(project, row) {
-  return { ...row, WORK_RECOMMENDATION_DTL_ID: row.WORK_RECOMMENDATION_DTL_ID || sourceWorkIdCandidates(project)[0], HOUSE_OF_PARLIAMENT: row.HOUSE_OF_PARLIAMENT || (project.house === 'Rajya Sabha' ? '1' : '2'), TENURE: row.TENURE || project.term, STATE_NAME: row.STATE_NAME || project.state, MP_NAME: row.MP_NAME || project.mp, CONSTITUENCY: row.CONSTITUENCY || project.constituency, FLAG: row.FLAG ?? null, FILE_STATUS: row.FILE_STATUS ?? true };
+  return { ...row, WORK_RECOMMENDATION_DTL_ID: row.WORK_RECOMMENDATION_DTL_ID || sourceWorkIdCandidates(project)[0], HOUSE_OF_PARLIAMENT: row.HOUSE_OF_PARLIAMENT || (project.house === 'Rajya Sabha' ? '1' : '2'), TENURE: row.TENURE || project.term, STATE_NAME: row.STATE_NAME || project.state, MP_NAME: row.MP_NAME || project.mp, CONSTITUENCY: row.CONSTITUENCY || project.constituency, FLAG: row.FLAG ?? row.flag ?? null, FILE_STATUS: row.FILE_STATUS ?? row.fileStatus ?? true };
 }
 
 async function recoverSourceProject(project) {
@@ -107,8 +107,8 @@ async function recoverSourceProject(project) {
   return null;
 }
 
-async function attachmentIdsFor(project, raw) {
-  const flags = [...new Set([raw?.FLAG, 1, 2, 3].map(Number).filter(Number.isFinite))];
+async function attachmentIdsFor(project, raw, requestedFlags = null) {
+  const flags = [...new Set((requestedFlags || [raw?.FLAG, 1, 2, 3]).map(Number).filter(Number.isFinite))];
   const responses = await Promise.allSettled(flags.map((flag) => getAttachmentReferences(raw, flag)));
   const refs = responses.flatMap((result) => result.status === 'fulfilled' ? attachmentIdsFromReferenceRows(result.value) : []);
   return [...new Map([...refs, ...attachmentIdsFromReferenceRows([raw])].filter((item) => item.id).map((item) => [item.id, item])).values()];
@@ -155,7 +155,7 @@ async function runEvidenceJob(project) {
     // round trip to MPLADS for them. This also prevents old hash-only indexes
     // from being mistaken for upstream attachment identifiers.
     if (!project.attachmentCandidates?.length) {
-      try { directRefs = await attachmentIdsFor(project, sourcePayload(project, project.raw || {})); } catch { /* use source recovery below */ }
+      try { directRefs = await attachmentIdsFor(project, sourcePayload(project, project.raw || {}), [project.raw?.flag, 1]); } catch { /* use source recovery below */ }
     }
     const recovered = directRefs.length ? null : await recoverSourceProject(project);
     const sourceProject = recovered ? { ...project, raw: recovered.raw, attachmentIds: [], attachmentCandidates: project.attachmentCandidates || [] } : project;
