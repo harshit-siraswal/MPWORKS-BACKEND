@@ -9,9 +9,9 @@ let nextRequestAt = 0;
 
 const clean = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
 
-async function post(path, body, timeoutMs = 60_000) {
+async function post(path, body, timeoutMs = 60_000, maxAttempts = 3) {
   let lastError;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     try {
       const waitMs = Math.max(nextRequestAt - Date.now(), 0);
       if (waitMs) await new Promise((resolve) => setTimeout(resolve, waitMs));
@@ -21,7 +21,7 @@ async function post(path, body, timeoutMs = 60_000) {
       const text = await response.text();
       try { return text ? JSON.parse(text.replace(/^\uFEFF/, '')) : null; }
       catch { throw new Error(`eSAKSHI ${path} returned invalid JSON`); }
-    } catch (error) { lastError = error; if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1))); }
+    } catch (error) { lastError = error; if (attempt < maxAttempts - 1) await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1))); }
   }
   throw lastError;
 }
@@ -59,12 +59,12 @@ export async function getWorkReport(combo, key, timeoutMs = 120_000) {
 
 export async function getAttachmentReferences(work, flag = work.FLAG) {
   const payload = { ...work, FLAG: flag };
-  const rows = await post('/rest/PreLoginDashboardData/getAttachIdsbyFlag', { json: payload });
+  const rows = await post('/rest/PreLoginDashboardData/getAttachIdsbyFlag', { json: payload }, 20_000, 2);
   return Array.isArray(rows) ? rows : [];
 }
 
 export async function getAttachment(id) {
-  const rows = await post('/rest/PreLoginCitizenWorkRcmdRest/getAttachmentById', { id }, 90_000);
+  const rows = await post('/rest/PreLoginCitizenWorkRcmdRest/getAttachmentById', { id }, 45_000, 2);
   return Array.isArray(rows) ? rows : [];
 }
 
