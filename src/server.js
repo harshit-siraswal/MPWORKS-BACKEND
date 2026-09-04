@@ -153,7 +153,12 @@ async function runEvidenceJob(project) {
     // state report for every project and is the critical path for completed
     // works that were not included in the initial attachment crawl.
     let directRefs = [];
-    try { directRefs = await attachmentIdsFor(project, sourcePayload(project, project.raw || {})); } catch { /* use source recovery below */ }
+    // Already-indexed R2 files are authoritative; do not make an unnecessary
+    // round trip to MPLADS for them. This also prevents old hash-only indexes
+    // from being mistaken for upstream attachment identifiers.
+    if (!project.attachmentCandidates?.length) {
+      try { directRefs = await attachmentIdsFor(project, sourcePayload(project, project.raw || {})); } catch { /* use source recovery below */ }
+    }
     const recovered = directRefs.length ? null : await recoverSourceProject(project);
     const sourceProject = recovered ? { ...project, raw: recovered.raw, attachmentIds: [], attachmentCandidates: project.attachmentCandidates || [] } : project;
     const sourceRefs = directRefs.length ? directRefs : recovered ? await attachmentIdsFor(project, recovered.raw) : (sourceProject.attachmentCandidates?.length ? [] : project.attachmentIds.map((id) => ({ id })));
