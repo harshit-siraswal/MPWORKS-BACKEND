@@ -55,6 +55,7 @@ function filtersFrom(url) {
     constituency: url.searchParams.get('constituency'),
     category: url.searchParams.get('category'),
     status: url.searchParams.get('status'),
+    statusGroup: url.searchParams.get('statusGroup'),
     sort: url.searchParams.get('sort')
   };
 }
@@ -177,14 +178,15 @@ function publicEvidenceForProject(evidence, projectId) {
   return result;
 }
 
-async function appendEvidenceIndex(project, files) {
+async function appendEvidenceIndex(project, files, options = {}) {
   if (project.source !== 'MPLADS live eSAKSHI ingest' || !files?.length) return;
+  const aiVerified = options.aiVerified === true;
   const root = process.env.MPLADS_LIVE_ROOT || join(process.cwd(), 'data', 'raw', 'esakshi');
   const path = join(root, 'attachments.ndjson');
   const existing = await readFile(path, 'utf8').catch(() => '');
   const existingKeys = new Set(existing.split(/\r?\n/).filter(Boolean).flatMap((line) => { try { const row = JSON.parse(line); return [`${row.sourceWorkId}|${row.term}|${row.houseCode}|${row.attachmentId}`]; } catch { return []; } }));
   const sourceWorkId = project.raw?.sourceWorkId || project.raw?.WORK_RECOMMENDATION_DTL_ID || project.raw?.WORK_ID;
-  const rows = files.map((file) => ({ sourceWorkId: sourceWorkId == null ? null : String(sourceWorkId), term: project.term, houseCode: project.house === 'Rajya Sabha' ? '1' : '2', flag: file.flag || project.raw?.flag || project.raw?.FLAG || 3, attachmentId: file.sourceAttachmentId, officialSourceVerified: true, aiVerified: true, fileName: file.fileName || null, mimeType: file.mimeType || null, sha256: file.sha256 || null, bytes: file.bytes || null, r2Key: file.r2Key || null, r2Url: file.r2Url || file.url || null, sourceUrl: file.sourceUrl || null, analyzedAt: file.analyzedAt || new Date().toISOString(), analyzer: file.analyzer || 'on-demand-evidence' })).filter((row) => row.sourceWorkId && row.attachmentId && row.r2Url && !existingKeys.has(`${row.sourceWorkId}|${row.term}|${row.houseCode}|${row.attachmentId}`));
+  const rows = files.map((file) => ({ sourceWorkId: sourceWorkId == null ? null : String(sourceWorkId), term: project.term, houseCode: project.house === 'Rajya Sabha' ? '1' : '2', flag: file.flag || project.raw?.flag || project.raw?.FLAG || 3, attachmentId: file.sourceAttachmentId, officialSourceVerified: true, aiVerified, verificationStatus: aiVerified ? 'verified' : 'source-only-ai-pending', fileName: file.fileName || null, mimeType: file.mimeType || null, sha256: file.sha256 || null, bytes: file.bytes || null, r2Key: file.r2Key || null, r2Url: file.r2Url || file.url || null, sourceUrl: file.sourceUrl || null, analyzedAt: file.analyzedAt || new Date().toISOString(), analyzer: file.analyzer || 'on-demand-evidence' })).filter((row) => row.sourceWorkId && row.attachmentId && row.r2Url && !existingKeys.has(`${row.sourceWorkId}|${row.term}|${row.houseCode}|${row.attachmentId}`));
   if (!rows.length) return;
   await mkdir(root, { recursive: true });
   const separator = existing && !existing.endsWith('\n') ? '\n' : '';
@@ -271,8 +273,12 @@ async function runEvidenceJob(project) {
     evidenceJobs.set(project.id, job);
     if (!evidence.files.length) return;
     let comparison = { status: 'queued', reason: 'AI evidence comparison is still running.' };
-    try { comparison = await analyzeEvidenceAgainstProject(project, evidence.files); } catch (error) { comparison = { status: 'error', reason: error.message }; }
-    if (isLiveProject && (comparison.status !== 'completed' || comparison.consistency !== 'consistent')) {
+    try { comparison = await analyzeEvidenceAgainstProject(project, evidence.files); } catch (error) {
+      const transient = /HTTP (429|500|502|503|504)|timed out|timeout|resource_exhausted/i.test(error.message || '');
+      comparison = { status: transient ? 'unavailable' : 'error', reason: transient ? 'The AI comparison service is temporarily unavailable. The source-linked file is available for human review; automatic comparison will be retried later.' : error.message, retryable: transient };
+    }
+    const sourceOnlyAllowed = isLiveProject && comparison.status === 'unavailable';
+    if (isLiveProject && !sourceOnlyAllowed && (comparison.status !== 'completed' || comparison.consistency !== 'consistent')) {
       const rejected = comparison.status === 'completed';
       Object.assign(job, { status: rejected ? 'rejected' : 'verification-failed', note: rejected ? 'The fetched file was withheld because its contents conflict with this source project. It was not stored or counted as evidence.' : 'The fetched file was withheld because its identity could not be verified against this source project. It was not stored or counted as evidence; retry after the comparison service is available.', files: [], images: [], documents: [], comparison, riskIndex: riskIndex(project, comparison, 0, feedback), persistence: { r2: 'not-written', supabase: 'not-written', stored: [], warnings: [rejected ? 'Evidence identity mismatch' : 'Evidence identity verification incomplete'] } });
       evidenceJobs.set(project.id, job);
@@ -284,7 +290,7 @@ async function runEvidenceJob(project) {
     // public payload after persistence so clients never receive a stale proxy
     // URL built from a SHA-256 content hash.
     const persistedFiles = publicEvidenceForProject(evidence, project.id);
-    try { await appendEvidenceIndex(project, persistedFiles.files); } catch (error) { persistence = { ...persistence, warnings: [...(persistence?.warnings || []), `Evidence index update failed: ${error.message}`] }; }
+    try { await appendEvidenceIndex(project, persistedFiles.files, { aiVerified: comparison.status === 'completed' && comparison.consistency === 'consistent' }); } catch (error) { persistence = { ...persistence, warnings: [...(persistence?.warnings || []), `Evidence index update failed: ${error.message}`] }; }
     if (evidence.files.length) {
       // Keep the in-process catalog consistent with the evidence endpoint so
       // MP profiles and work tables stop showing 0 immediately after a
@@ -293,7 +299,7 @@ async function runEvidenceJob(project) {
       project.attachmentIds = [...new Set(persistedFiles.files.map((file) => file.sourceAttachmentId).filter(Boolean))];
       project.imageUrls = persistedFiles.images.map((file) => file.url).filter(Boolean);
     }
-    Object.assign(job, { status: 'analyzed', note: 'Source evidence was fetched. Image/PDF bytes were compared with the project metadata; AI findings are triage signals for human review, not a fraud finding.', ...persistedFiles, comparison, riskIndex: riskIndex(project, comparison, evidence.files.length, feedback), persistence });
+    Object.assign(job, { status: sourceOnlyAllowed ? 'available' : 'analyzed', note: sourceOnlyAllowed ? 'Source evidence was fetched and stored. Automatic AI comparison is temporarily unavailable; the file is available for human review and is not treated as AI-verified.' : 'Source evidence was fetched. Image/PDF bytes were compared with the project metadata; AI findings are triage signals for human review, not a fraud finding.', ...persistedFiles, comparison, riskIndex: riskIndex(project, comparison, evidence.files.length, feedback), persistence });
   } catch (error) {
     Object.assign(job, { status: 'failed', error: error.message, note: 'The official source or storage service was temporarily unavailable. Retry this record; no mock evidence was substituted.' });
   }
