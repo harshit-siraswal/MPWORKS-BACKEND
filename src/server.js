@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { appendFile, mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
 import { attachmentIdsFromReferenceRows, getAttachment, getAttachmentReferences, getStates, getTenures, getWorkReport, getMetrics as getLiveMetrics } from './esakshi-source.js';
@@ -184,13 +184,17 @@ async function appendEvidenceIndex(project, files, options = {}) {
   const root = process.env.MPLADS_LIVE_ROOT || join(process.cwd(), 'data', 'raw', 'esakshi');
   const path = join(root, 'attachments.ndjson');
   const existing = await readFile(path, 'utf8').catch(() => '');
-  const existingKeys = new Set(existing.split(/\r?\n/).filter(Boolean).flatMap((line) => { try { const row = JSON.parse(line); return [`${row.sourceWorkId}|${row.term}|${row.houseCode}|${row.attachmentId}`]; } catch { return []; } }));
+  const existingRows = existing.split(/\r?\n/).filter(Boolean).flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } });
   const sourceWorkId = project.raw?.sourceWorkId || project.raw?.WORK_RECOMMENDATION_DTL_ID || project.raw?.WORK_ID;
-  const rows = files.map((file) => ({ sourceWorkId: sourceWorkId == null ? null : String(sourceWorkId), term: project.term, houseCode: project.house === 'Rajya Sabha' ? '1' : '2', flag: file.flag || project.raw?.flag || project.raw?.FLAG || 3, attachmentId: file.sourceAttachmentId, officialSourceVerified: true, aiVerified, verificationStatus: aiVerified ? 'verified' : 'source-only-ai-pending', fileName: file.fileName || null, mimeType: file.mimeType || null, sha256: file.sha256 || null, bytes: file.bytes || null, r2Key: file.r2Key || null, r2Url: file.r2Url || file.url || null, sourceUrl: file.sourceUrl || null, analyzedAt: file.analyzedAt || new Date().toISOString(), analyzer: file.analyzer || 'on-demand-evidence' })).filter((row) => row.sourceWorkId && row.attachmentId && row.r2Url && !existingKeys.has(`${row.sourceWorkId}|${row.term}|${row.houseCode}|${row.attachmentId}`));
+  const rows = files.map((file) => ({ sourceWorkId: sourceWorkId == null ? null : String(sourceWorkId), term: project.term, houseCode: project.house === 'Rajya Sabha' ? '1' : '2', flag: file.flag || project.raw?.flag || project.raw?.FLAG || 3, attachmentId: file.sourceAttachmentId, officialSourceVerified: true, aiVerified, verificationStatus: aiVerified ? 'verified' : 'source-only-ai-pending', fileName: file.fileName || null, mimeType: file.mimeType || null, sha256: file.sha256 || null, bytes: file.bytes || null, r2Key: file.r2Key || null, r2Url: file.r2Url || file.url || null, sourceUrl: file.sourceUrl || null, analyzedAt: file.analyzedAt || new Date().toISOString(), analyzer: file.analyzer || 'on-demand-evidence' })).filter((row) => row.sourceWorkId && row.attachmentId && row.r2Url);
   if (!rows.length) return;
   await mkdir(root, { recursive: true });
-  const separator = existing && !existing.endsWith('\n') ? '\n' : '';
-  await appendFile(path, separator + rows.map((row) => JSON.stringify(row)).join('\n') + '\n', 'utf8');
+  const merged = new Map(existingRows.map((row) => [`${row.sourceWorkId}|${row.term}|${row.houseCode}|${row.attachmentId}`, row]));
+  for (const row of rows) {
+    const key = `${row.sourceWorkId}|${row.term}|${row.houseCode}|${row.attachmentId}`;
+    merged.set(key, { ...(merged.get(key) || {}), ...row });
+  }
+  await writeFile(path, `${[...merged.values()].map((row) => JSON.stringify(row)).join('\n')}\n`, 'utf8');
 }
 
 function evidenceItemsForProject(project, attachmentCount) {
