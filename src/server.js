@@ -282,9 +282,11 @@ async function runEvidenceJob(project) {
       const transient = /HTTP (429|500|502|503|504)|timed out|timeout|resource_exhausted/i.test(error.message || '');
       comparison = { status: transient ? 'unavailable' : 'error', reason: transient ? 'The AI comparison service is temporarily unavailable. The source-linked file is available for human review; automatic comparison will be retried later.' : error.message, retryable: transient };
     }
-    const sourceOnlyAllowed = isLiveProject && comparison.status === 'unavailable';
-    if (isLiveProject && !sourceOnlyAllowed && (comparison.status !== 'completed' || comparison.consistency !== 'consistent')) {
-      const rejected = comparison.status === 'completed';
+    const excludedAttachmentIds = new Set((comparison.excludedFiles || []).map((file) => String(file.sourceAttachmentId || '')).filter(Boolean));
+    if (excludedAttachmentIds.size) evidence.files = evidence.files.filter((file) => !excludedAttachmentIds.has(String(file.sourceAttachmentId || '')));
+    const sourceOnlyAllowed = isLiveProject && comparison.status !== 'completed';
+    const rejected = isLiveProject && comparison.status === 'completed' && comparison.consistency === 'inconsistent';
+    if (rejected || (isLiveProject && !sourceOnlyAllowed && comparison.status !== 'completed')) {
       Object.assign(job, { status: rejected ? 'rejected' : 'verification-failed', note: rejected ? 'The fetched file was withheld because its contents conflict with this source project. It was not stored or counted as evidence.' : 'The fetched file was withheld because its identity could not be verified against this source project. It was not stored or counted as evidence; retry after the comparison service is available.', files: [], images: [], documents: [], comparison, riskIndex: riskIndex(project, comparison, 0, feedback), persistence: { r2: 'not-written', supabase: 'not-written', stored: [], warnings: [rejected ? 'Evidence identity mismatch' : 'Evidence identity verification incomplete'] } });
       evidenceJobs.set(project.id, job);
       return;
@@ -304,7 +306,13 @@ async function runEvidenceJob(project) {
       project.attachmentIds = [...new Set(persistedFiles.files.map((file) => file.sourceAttachmentId).filter(Boolean))];
       project.imageUrls = persistedFiles.images.map((file) => file.url).filter(Boolean);
     }
-    Object.assign(job, { status: sourceOnlyAllowed ? 'available' : 'analyzed', note: sourceOnlyAllowed ? 'Source evidence was fetched and stored. Automatic AI comparison is temporarily unavailable; the file is available for human review and is not treated as AI-verified.' : 'Source evidence was fetched. Image/PDF bytes were compared with the project metadata; AI findings are triage signals for human review, not a fraud finding.', ...persistedFiles, comparison, riskIndex: riskIndex(project, comparison, evidence.files.length, feedback), persistence });
+    const aiVerified = comparison.status === 'completed' && comparison.consistency === 'consistent';
+    const note = aiVerified
+      ? 'Source evidence was fetched and compared with the project metadata; AI findings are triage signals for human review, not a fraud finding.'
+      : comparison.status === 'completed'
+        ? 'Source evidence was fetched. Some files require human review or were excluded after file-level comparison; remaining files are not treated as AI-verified.'
+        : 'Source evidence was fetched and stored. Automatic AI comparison is temporarily unavailable; the files are available for human review and are not treated as AI-verified.';
+    Object.assign(job, { status: aiVerified ? 'analyzed' : 'available', note, ...persistedFiles, comparison, riskIndex: riskIndex(project, comparison, evidence.files.length, feedback), persistence });
   } catch (error) {
     Object.assign(job, { status: 'failed', error: error.message, note: 'The official source or storage service was temporarily unavailable. Retry this record; no mock evidence was substituted.' });
   }
