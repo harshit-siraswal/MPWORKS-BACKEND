@@ -145,6 +145,21 @@ async function attachmentIdsFor(project, raw, requestedFlags = null) {
 
 function attachmentProxyUrl(projectId, attachmentId) { return `/api/projects/${encodeURIComponent(projectId)}/evidence/attachment/${encodeURIComponent(attachmentId)}`; }
 
+function projectAttachmentIds(project) {
+  const job = evidenceJobs.get(project?.id);
+  return new Set([
+    ...(project?.attachmentIds || []),
+    ...(project?.attachmentCandidates || []).map((file) => file.sourceAttachmentId || file.attachmentId),
+    ...(job?.files || []).map((file) => file.sourceAttachmentId || file.attachmentId)
+  ].filter(Boolean).map((value) => String(value)));
+}
+
+function attachmentBelongsToProject(project, attachmentId) {
+  const id = String(attachmentId || '');
+  if (!project || !id || isQuarantinedLiveEvidence(project, id)) return false;
+  return projectAttachmentIds(project).has(id);
+}
+
 function isContentHash(value) { return /^[0-9a-f]{64}$/i.test(String(value || '')); }
 
 function publicEvidenceUrl(projectId, file) {
@@ -627,6 +642,7 @@ const server = createServer(async (request, response) => {
     if (!project) return sendJson(response, 404, { error: 'project_not_found' });
     try {
       const attachmentId = decodeURIComponent(attachmentMatch[2]);
+      if (!attachmentBelongsToProject(project, attachmentId)) return sendJson(response, 404, { error: 'attachment_not_associated_with_project' });
       const attachment = await fetchStoredDocumentBinary(attachmentId) || await fetchAttachmentBinary(attachmentId);
       if (!attachment) return sendJson(response, 404, { error: 'attachment_payload_not_found' });
       response.writeHead(200, { 'Content-Type': attachment.mimeType, 'Content-Length': attachment.buffer.length, 'Cache-Control': 'private, max-age=300', 'Content-Disposition': `inline; filename="${String(attachment.fileName || 'evidence').replace(/[^a-z0-9._-]/gi, '_')}"` });
