@@ -10,7 +10,7 @@ export async function analyzeEvidenceAgainstProject(project, files = []) {
   if (!process.env.GEMINI_API_KEY) return { status: 'unavailable', reason: 'GEMINI_API_KEY is not configured' };
   const evidence = files.filter((file) => file.buffer && (file.mimeType?.startsWith('image/') || file.mimeType === 'application/pdf')).slice(0, 4);
   if (!evidence.length) return { status: 'inconclusive', reason: 'No image or PDF evidence was fetched' };
-  const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+  const model = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
   const projectRecord = {
     title: project.title,
     description: project.raw?.description || project.raw?.WORK_DESCRIPTION || project.title,
