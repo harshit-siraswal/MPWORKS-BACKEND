@@ -2,17 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { analyzeEvidenceAgainstProject } from './evidence-analysis.js';
 import { analyzeStoredAttachments, fetchAndAnalyzeAttachments, fetchAndAnalyzeImages } from './image-analysis.js';
 import { persistEvidence } from './persistence/evidence.js';
+import { calculateRiskIndex } from './risk-index.js';
 
 const jobs = new Map();
 const clean = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
-
-function scoreFor(comparison, evidenceCount) {
-  if (!comparison || comparison.status === 'unavailable') return { score: null, label: 'AI unavailable', confidence: 0 };
-  if (!evidenceCount || comparison.status === 'inconclusive') return { score: 50, label: 'Insufficient evidence', confidence: 20 };
-  if (comparison.consistency === 'inconsistent') return { score: 85, label: 'High review priority', confidence: Number(comparison.confidence) || 75 };
-  if (comparison.consistency === 'consistent') return { score: 15, label: 'Low review priority', confidence: Number(comparison.confidence) || 70 };
-  return { score: 50, label: 'Needs review', confidence: Number(comparison.confidence) || 25 };
-}
 
 async function evidenceFor(project) {
   const stored = await analyzeStoredAttachments(project.attachmentCandidates || []);
@@ -34,10 +27,12 @@ async function runJob(job) {
         const evidence = await evidenceFor(project);
         let comparison = { status: 'inconclusive', reason: 'No image or PDF evidence was fetched' };
         if (evidence.files.length) comparison = await analyzeEvidenceAgainstProject(project, evidence.files);
+        const excludedAttachmentIds = new Set((comparison.excludedFiles || []).map((file) => String(file.sourceAttachmentId || '')).filter(Boolean));
+        const usableFiles = evidence.files.filter((file) => !excludedAttachmentIds.has(String(file.sourceAttachmentId || '')));
         let persistence = { r2: 'not-configured', supabase: 'not-configured', stored: [], warnings: [] };
-        if (evidence.files.length) { try { persistence = await persistEvidence(project, evidence.files, comparison); } catch (error) { persistence = { r2: 'error', supabase: 'error', stored: [], warnings: [error.message] }; } }
-        const priority = scoreFor(comparison, evidence.files.length);
-        results.push({ projectId: project.id, score: priority.score, label: priority.label, confidence: priority.confidence, evidenceCount: evidence.files.length, comparison: { consistency: comparison.consistency || comparison.status, summary: comparison.summary || comparison.reason || '', possibleIssues: comparison.possibleIssues || [] }, persistence: { r2: persistence.r2, supabase: persistence.supabase } });
+        if (usableFiles.length) { try { persistence = await persistEvidence(project, usableFiles, comparison); } catch (error) { persistence = { r2: 'error', supabase: 'error', stored: [], warnings: [error.message] }; } }
+        const priority = calculateRiskIndex(project, comparison, usableFiles.length);
+        results.push({ projectId: project.id, score: priority.score, label: priority.label, confidence: priority.confidence, evidenceCount: usableFiles.length, comparison: { consistency: comparison.consistency || comparison.status, summary: comparison.summary || comparison.reason || '', possibleIssues: comparison.possibleIssues || [] }, persistence: { r2: persistence.r2, supabase: persistence.supabase } });
       } catch (error) { results.push({ projectId: project.id, score: null, label: 'Analysis failed', confidence: 0, evidenceCount: 0, comparison: { consistency: 'error', summary: error.message, possibleIssues: [] } }); }
       job.completed = results.length;
     }
