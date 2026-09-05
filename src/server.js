@@ -124,11 +124,14 @@ async function recoverSourceProject(project) {
   return null;
 }
 
-async function attachmentLookupFor(raw, requestedFlags = null) {
+async function attachmentLookupFor(raw, requestedFlags = null, options = {}) {
   const flags = [...new Set((requestedFlags || [raw?.FLAG, 1, 2, 3]).map(Number).filter((flag) => Number.isInteger(flag) && flag >= 1 && flag <= 3))];
   const responses = await Promise.allSettled(flags.map((flag) => getAttachmentReferences(raw, flag)));
   const refs = responses.flatMap((result) => result.status === 'fulfilled' ? attachmentIdsFromReferenceRows(result.value) : []);
-  const fallbackRefs = attachmentIdsFromReferenceRows([raw]);
+  // A live source row may carry a stale attachment field copied from an older
+  // crawl. For live verification, only IDs returned by the exact official
+  // attachment lookup are authoritative; never promote the raw row fallback.
+  const fallbackRefs = options.includeRawFallback === false ? [] : attachmentIdsFromReferenceRows([raw]);
   return {
     refs: [...new Map([...refs, ...fallbackRefs].filter((item) => item.id).map((item) => [item.id, item])).values()],
     complete: responses.length > 0 && responses.every((result) => result.status === 'fulfilled'),
@@ -202,7 +205,7 @@ async function runEvidenceJob(project) {
     // eSAKSHI attachment lookup for this exact work.
     if (isLiveProject || !project.attachmentCandidates?.length) {
       try {
-        directLookup = await attachmentLookupFor(sourcePayload(project, project.raw || {}), [project.raw?.flag, 1, 2, 3]);
+        directLookup = await attachmentLookupFor(sourcePayload(project, project.raw || {}), [project.raw?.flag, 1, 2, 3], { includeRawFallback: false });
         directRefs = directLookup.refs.filter((item) => !isQuarantinedLiveEvidence(project, item.id));
       } catch { /* use the empty result below */ }
     }
@@ -218,7 +221,7 @@ async function runEvidenceJob(project) {
     const recovered = directRefs.length || (directLookup?.complete && isLiveProject) ? null : await recoverSourceProject(project);
     let recoveredLookup = null;
     if (recovered && (isLiveProject || !directRefs.length)) {
-      recoveredLookup = await attachmentLookupFor(recovered.raw, [recovered.raw?.FLAG, 1, 2, 3]);
+      recoveredLookup = await attachmentLookupFor(recovered.raw, [recovered.raw?.FLAG, 1, 2, 3], { includeRawFallback: false });
       if (recoveredLookup.refs.length) directRefs = recoveredLookup.refs.filter((item) => !isQuarantinedLiveEvidence(project, item.id));
     }
     const liveLookup = recoveredLookup || directLookup;
