@@ -4,12 +4,18 @@ Source-backed MPLADS catalog API for the MP Works explorer.
 
 ## Run
 
+The public API now runs on Python/FastAPI. The Node scripts remain available for the eSAKSHI ingestion worker and scheduled evidence pipeline.
+
 ```powershell
-npm install
-npm start
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+uvicorn python_api.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
 The API listens on `http://127.0.0.1:8000`.
+
+Interactive OpenAPI documentation is available at `http://127.0.0.1:8000/api/docs`; the generated schema is at `/api/openapi.json`.
 
 ## MPLADS ingestion (the important path)
 
@@ -37,7 +43,7 @@ For a hosted worker, add `R2_ACCOUNT_ID`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_S
 
 ```powershell
 $env:MPLADS_CATALOG_PATH = "data/source/MPLADS-live.csv"
-npm start
+uvicorn python_api.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
 The government host can be intermittent; the collector retries each API request three times and records any remaining errors in the manifest. When reachable, this pipeline fetches current terms (including 18th Lok Sabha when published by MPLADS) and attachment evidence.
@@ -47,20 +53,22 @@ The government host can be intermittent; the collector retries each API request 
 - `GET /api/projects?house=&term=&state=&district=&category=&query=&limit=&offset=`
 - `GET /api/projects/:id`
 - `GET /api/projects/:id/evidence`
-- `POST /api/projects/:id/evidence/refresh` resolves the live eSAKSHI work ID, fetches official JPEG/PNG/PDF attachments, analyzes images, and stores them in R2 when configured
-- `GET /api/projects/:id/evidence/attachment/:attachmentId` provides a bounded source proxy for attachments that have not yet been copied to R2
+- `POST /api/projects/:id/evidence/refresh` accepts an evidence-analysis request and returns `202`; the Node ingestion worker currently owns live eSAKSHI retrieval, Gemini comparison, and R2 persistence
+- `GET /api/projects/:id/evidence/attachment/:attachmentId` returns persisted attachment metadata when available; direct source proxying remains in the ingestion boundary during migration
 - `GET /api/projects/:id/evidence/location` checks stored evidence image EXIF metadata for GPS coordinates when available
 - `POST /api/projects/:id/reports`
 - `GET /api/map/locations` returns explicitly labelled district approximations from OpenStreetMap Nominatim
 - `GET /api/catalog/summary`
 - `GET /api/catalog/facets`
 - `GET /api/catalog/metrics`
-- `GET /api/catalog/live-metrics?combo=state,constituency,mp,house[,tenure]`
+- `GET /api/catalog/live-metrics?combo=state,constituency,mp,house[,tenure]` remains owned by the Node ingestion boundary while the Python API migration is completed.
 - `GET /api/villages?query=&state=&district=&house=&term=`
 - `GET /api/source-health`
 - `GET /api/methodology`
 
-Image analysis uses Sharp to calculate format, dimensions, SHA-256, dominant colour and a perceptual average hash. Similarity is an evidence signal only; it is not a fraud conclusion. The legacy snapshot has no attachment URLs, so evidence refresh resolves the selected row against the live Supabase catalog and official eSAKSHI report before deciding whether attachments are available.
+The Python evidence layer uses Pillow/OpenCV for format, dimensions, SHA-256, dominant colour, perceptual hashing, bilateral filtering and Sauvola thresholding, plus `pypdfium2` and `pdfplumber` for PDF inspection. The existing Node ingestion worker still uses Sharp for live attachment analysis. Similarity is an evidence signal only; it is not a fraud conclusion. These preprocessing algorithms are deterministic helpers around an optional Gemini vision-language comparison; Gemini does not silently apply Sauvola, bilateral filtering or TPS to every request.
+
+The deployment is intentionally transitional: FastAPI serves the public read API and typed request contracts, while the proven Node worker continues scheduled eSAKSHI collection and durable evidence ingestion. The next production hardening step is to move the worker behind a queue and use PostgreSQL/PostGIS (and pgvector where semantic search is needed) as the canonical API store instead of loading the CSV/NDJSON snapshot into memory.
 
 ## Provenance
 
