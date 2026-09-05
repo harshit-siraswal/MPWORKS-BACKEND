@@ -21,7 +21,7 @@ services:
       - key: MPLADS_MAX_WORKS
         value: "0"
       - key: GEMINI_MODEL
-        value: gemini-3.5-flash
+        value: gemini-2.5-flash
       - key: GOOGLE_CLOUD_PROJECT
         value: "200141425784"
       - key: R2_ACCOUNT_ID
@@ -70,7 +70,7 @@ services:
       - key: MPLADS_MAX_WORKS
         value: "0"
       - key: GEMINI_MODEL
-        value: gemini-3.5-flash
+        value: gemini-2.5-flash
       - key: GOOGLE_CLOUD_PROJECT
         value: "200141425784"
       - key: R2_ACCOUNT_ID

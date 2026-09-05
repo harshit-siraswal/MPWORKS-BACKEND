@@ -35,7 +35,7 @@ async function persistRun() {
 
 async function analyzeRun(state) {
   if (!process.env.GEMINI_API_KEY || !state.manifest) return { status: 'skipped', reason: 'GEMINI_API_KEY is not configured', sourceFacts: { works: state.manifest?.works || 0, errors: state.manifest?.errors?.length || 0 } };
-  const model = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
+  const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
   const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
